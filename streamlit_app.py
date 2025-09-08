@@ -117,113 +117,221 @@ except Exception as e:
     st.warning(f"Could not read crosswalk count: {e}")
 
 # =============================================================================
-# Vendor select (dynamic from DB, '' = GLOBAL at the top)
+# 2) Vendor input + file uploader
 # =============================================================================
-def _load_vendor_list() -> list[str]:
+vendor = st.selectbox("Vendor", options=["", "DOB0000025", "DOB0000001", "DOB0009999"], index=0)
+st.caption("Leave empty for GLOBAL mappings (applies to all vendors).")
+
+st.subheader("2) Upload supplier invoice (Excel / CSV / PDF)")
+uploaded = st.file_uploader("Drag and drop the file here", type=["xlsx", "xls", "csv", "pdf"])
+
+preview_df: pd.DataFrame | None = None
+if uploaded is not None:
     try:
-        with engine.connect() as conn:
-            dfv = pd.read_sql(text("SELECT DISTINCT vendor_id FROM crosswalk"), conn)
-        vals = sorted(set(str(x or "") for x in dfv["vendor_id"]))
-    except Exception:
-        vals = []
-    # '' (GLOBAL) stavi na vrh
-    if "" in vals:
-        vals.remove("")
-    return [""] + vals  # prvi je GLOBAL
+        suffix = Path(uploaded.name).suffix.lower()
 
-if "vendor_list" not in st.session_state:
-    st.session_state.vendor_list = _load_vendor_list()
+        if suffix in [".xlsx", ".xls"]:
+            preview_df = pd.read_excel(uploaded)
+        elif suffix == ".csv":
+            # try to sniff separator
+            content = uploaded.getvalue().decode("utf-8", errors="replace")
+            sniffer = csv.Sniffer()
+            dialect = sniffer.sniff(content.splitlines()[0])
+            sep = dialect.delimiter
+            preview_df = pd.read_csv(BytesIO(uploaded.getvalue()), sep=sep)
+        elif suffix == ".pdf":
+            # very light extraction: try table extraction with pdfplumber
+            tables = []
+            with pdfplumber.open(BytesIO(uploaded.getvalue())) as pdf:
+                for page in pdf.pages:
+                    tbl = page.extract_table()
+                    if tbl:
+                        # first row headers
+                        header, *rows = tbl
+                        dfp = pd.DataFrame(rows, columns=[str(x) for x in header])
+                        tables.append(dfp)
+            if tables:
+                preview_df = pd.concat(tables, ignore_index=True)
+            else:
+                st.error("No tables detected in PDF.")
+                preview_df = None
+        else:
+            st.error(f"Unsupported file type: {suffix}")
+            preview_df = None
 
-vendor = st.selectbox(
-    "Vendor",
-    options=st.session_state.vendor_list,
-    format_func=lambda v: "GLOBAL (blank)" if v == "" else v,
-    index=0 if "" in st.session_state.vendor_list else 0,
-    key="vendor_select",
-)
-st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
+        if preview_df is not None:
+            st.caption(f"📄 Columns: {', '.join(map(str, preview_df.columns))}")
+            st.dataframe(df_head(preview_df), use_container_width=True)
+    except Exception as e:
+        st.error(f"Failed to read file: {e}")
+        preview_df = None
 
 # =============================================================================
-# 3) Map to TOW  (persistent in session_state)
+# 3) Map to TOW
 # =============================================================================
 st.subheader("3) Map to TOW")
 
 if preview_df is not None and isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
+    # choose which column contains the SUPPLIER code
     supplier_col = st.selectbox(
         "Which column contains the SUPPLIER code?",
         options=list(preview_df.columns),
         index=0,
-        key="supplier_col_select",
     )
 
-    if st.button("Run mapping", type="primary", key="btn_run_mapping"):
+    if st.button("Run mapping", type="primary"):
         try:
             df_sup = preview_df.rename(columns={supplier_col: "supplier_id"}).copy()
             df_sup["supplier_id"] = df_sup["supplier_id"].astype(str).str.strip()
 
-            vparam = vendor.strip() if vendor is not None else ""
-
+            # Prepare params
+            # empty vendor means global
+            vparam = vendor.strip() if vendor else ""
+            # Query join
             with engine.connect() as conn:
-                df_map = pd.read_sql(
-                    text("""
-                        SELECT vendor_id, supplier_id, tow_code
-                        FROM crosswalk
-                        WHERE vendor_id = :v OR vendor_id = ''
-                    """),
-                    conn,
-                    params={"v": vparam},
-                )
+                # Try vendor-specific first; if not found use GLOBAL ('')
+                # vendor hit
+                q_vendor = text("""
+                    SELECT c.vendor_id, c.supplier_id, c.tow_code
+                    FROM crosswalk c
+                    WHERE (c.vendor_id = :vparam OR c.vendor_id = '')
+                """)
+                df_map = pd.read_sql(q_vendor, conn, params={"vparam": vparam})
 
-            mapp = {(r["vendor_id"], r["supplier_id"]): r["tow_code"] for _, r in df_map.iterrows()}
-
-            def resolve_tow(supp_code: str) -> Optional[str]:
+            # Build a mapping dict keyed by (vendor_id, supplier_id) and ('', supplier_id)
+            # Priority: exact vendor, fallback to global ''
+            vendor_dict = {(r["vendor_id"], r["supplier_id"]): r["tow_code"] for _, r in df_map.iterrows()}
+            def resolve_tow(supp_code: str) -> str | None:
                 s = str(supp_code)
-                return (
-                    mapp.get((vparam, s))
-                    or mapp.get(("", s))
-                    or None
-                )
+                # exact vendor
+                if (vparam, s) in vendor_dict:
+                    return vendor_dict[(vparam, s)]
+                # global
+                if ("", s) in vendor_dict:
+                    return vendor_dict[("", s)]
+                return None
 
             df_out = df_sup.copy()
             df_out["tow"] = df_out["supplier_id"].map(resolve_tow)
 
-            st.session_state.matched = df_out[df_out["tow"].notna()].copy()
-            st.session_state.unmatched = df_out[df_out["tow"].isna()].copy()
-            st.session_state.mapped_ready = True
-            st.session_state.matched_cols = list(st.session_state.matched.columns)
-            st.session_state.unmatched_cols = list(st.session_state.unmatched.columns)
-            st.toast("Mapping complete ✅", icon="✅")
+            matched = df_out[df_out["tow"].notna()].copy()
+            unmatched = df_out[df_out["tow"].isna()].copy()
+
+            st.success(f"Mapping complete → matched: {len(matched):,} | unmatched: {len(unmatched):,}")
+
+            with st.expander("Preview: Matched (first 200 rows)", expanded=False):
+                st.dataframe(df_head(matched, 200), use_container_width=True)
+            with st.expander("Preview: Unmatched (first 200 rows)", expanded=False):
+                st.dataframe(df_head(unmatched, 200), use_container_width=True)
+
+            # === Old/simple export (zadržavamo ga) ==============================
+            def to_excel_bytes(d: dict) -> bytes:
+                bio = BytesIO()
+                with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                    for sheet, df in d.items():
+                        df.to_excel(w, index=False, sheet_name=sheet)
+                return bio.getvalue()
+
+            st.download_button(
+                "Download Excel (Matched + Unmatched)",
+                data=to_excel_bytes({"Matched": matched, "Unmatched": unmatched}),
+                file_name="mapping_result.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+            # ==== 4) Custom Excel export (choose columns & order) =========================
+            st.subheader("4) Custom Excel export")
+
+            def _excel_from_dict(dfs: dict[str, pd.DataFrame]) -> bytes:
+                """
+                Build an XLSX from a dict of DataFrames {sheet_name: df}.
+                """
+                bio2 = BytesIO()
+                with pd.ExcelWriter(bio2, engine="xlsxwriter") as w:
+                    for sheet, df in dfs.items():
+                        if isinstance(df, pd.DataFrame) and not df.empty:
+                            df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet)
+                return bio2.getvalue()
+
+            tabs = st.tabs(["Matched", "Unmatched", "Both (custom)"])
+
+            # --- Tab 1: Matched only ---
+            with tabs[0]:
+                if isinstance(matched, pd.DataFrame) and not matched.empty:
+                    all_cols_m = list(matched.columns)
+                    st.caption("Odaberi kolone (redoslijed = redoslijed u multiselectu).")
+                    cols_m = st.multiselect(
+                        "Columns to export (Matched)",
+                        options=all_cols_m,
+                        default=all_cols_m,
+                        key="custom_cols_matched",
+                    )
+                    dfm = matched[cols_m] if cols_m else matched
+                    st.dataframe(dfm.head(30), use_container_width=True, height=240)
+                    st.download_button(
+                        "⬇️ Download Matched (custom columns)",
+                        data=_excel_from_dict({"Matched": dfm}),
+                        file_name="matched_custom.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_matched_custom",
+                    )
+                else:
+                    st.info("Nema Matched podataka za export.")
+
+            # --- Tab 2: Unmatched only ---
+            with tabs[1]:
+                if isinstance(unmatched, pd.DataFrame) and not unmatched.empty:
+                    all_cols_u = list(unmatched.columns)
+                    st.caption("Odaberi kolone (redoslijed = redoslijed u multiselectu).")
+                    cols_u = st.multiselect(
+                        "Columns to export (Unmatched)",
+                        options=all_cols_u,
+                        default=all_cols_u,
+                        key="custom_cols_unmatched",
+                    )
+                    dfu = unmatched[cols_u] if cols_u else unmatched
+                    st.dataframe(dfu.head(30), use_container_width=True, height=240)
+                    st.download_button(
+                        "⬇️ Download Unmatched (custom columns)",
+                        data=_excel_from_dict({"Unmatched": dfu}),
+                        file_name="unmatched_custom.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_unmatched_custom",
+                    )
+                else:
+                    st.info("Nema Unmatched podataka za export.")
+
+            # --- Tab 3: Both sheets (svaki sa svojim izborom kolona) ---
+            with tabs[2]:
+                has_any = (isinstance(matched, pd.DataFrame) and not matched.empty) or \
+                          (isinstance(unmatched, pd.DataFrame) and not unmatched.empty)
+                if has_any:
+                    cols_m_both = st.session_state.get("custom_cols_matched", list(getattr(matched, "columns", [])))
+                    cols_u_both = st.session_state.get("custom_cols_unmatched", list(getattr(unmatched, "columns", [])))
+
+                    dfm_both = matched[cols_m_both] if isinstance(matched, pd.DataFrame) and not matched.empty and cols_m_both else matched
+                    dfu_both = unmatched[cols_u_both] if isinstance(unmatched, pd.DataFrame) and not unmatched.empty and cols_u_both else unmatched
+
+                    data_dict = {}
+                    if isinstance(dfm_both, pd.DataFrame) and dfm_both is not None and not dfm_both.empty:
+                        data_dict["Matched"] = dfm_both
+                    if isinstance(dfu_both, pd.DataFrame) and dfu_both is not None and not dfu_both.empty:
+                        data_dict["Unmatched"] = dfu_both
+
+                    st.download_button(
+                        "⬇️ Download Both (custom columns & order)",
+                        data=_excel_from_dict(data_dict),
+                        file_name="mapping_custom.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_both_custom",
+                    )
+                else:
+                    st.info("Nema podataka za zajednički export.")
+
         except Exception as e:
-            st.session_state.mapped_ready = False
             st.error(f"Mapping failed: {e}")
-
-# ——— PRIKAZ ako već imamo rezultat u session_state (sprječava reset na widget promjenama)
-if st.session_state.get("mapped_ready", False):
-    matched = st.session_state.matched
-    unmatched = st.session_state.unmatched
-
-    st.success(f"Mapping complete → matched: {len(matched):,} | unmatched: {len(unmatched):,}")
-
-    with st.expander("Preview: Matched (first 200 rows)", expanded=False):
-        st.dataframe(matched.head(200), use_container_width=True)
-    with st.expander("Preview: Unmatched (first 200 rows)", expanded=False):
-        st.dataframe(unmatched.head(200), use_container_width=True)
-
-    # — stari/simpler export ostaje —
-    def _to_excel_bytes(dfs: dict[str, pd.DataFrame]) -> bytes:
-        bio = BytesIO()
-        with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-            for name, df in dfs.items():
-                df.to_excel(w, index=False, sheet_name=name)
-        return bio.getvalue()
-
-    st.download_button(
-        "Download Excel (Matched + Unmatched)",
-        data=_to_excel_bytes({"Matched": matched, "Unmatched": unmatched}),
-        file_name="mapping_result.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_simple_both",
-    )
+else:
+    st.info("Upload your supplier invoice to enable mapping.")
 
 # =============================================================================
 # Admin helpers (upsert/queue)
