@@ -117,7 +117,6 @@ except Exception as e:
     st.warning(f"Could not read crosswalk count: {e}")
 
 # =============================================================================
-# =============================================================================
 # Vendor select (dynamic from DB, '' = GLOBAL at the top)
 # =============================================================================
 def _load_vendor_list() -> list[str]:
@@ -145,7 +144,6 @@ vendor = st.selectbox(
 st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
 
 # =============================================================================
-
 # 3) Map to TOW  (persistent in session_state)
 # =============================================================================
 st.subheader("3) Map to TOW")
@@ -227,8 +225,7 @@ if st.session_state.get("mapped_ready", False):
         key="dl_simple_both",
     )
 
-
-
+# =============================================================================
 # Admin helpers (upsert/queue)
 # =============================================================================
 st.divider()
