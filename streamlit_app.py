@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 import pandas as pd
 import streamlit as st
 
-# PDF ekstrakcija je opcionalna
+# PDF parsing (optional)
 try:
     import pdfplumber  # type: ignore
     _HAS_PDF = True
@@ -23,7 +23,7 @@ st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide
 
 
 # =============================================================================
-# Utility
+# Helpers
 # =============================================================================
 def _excel_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     bio = BytesIO()
@@ -45,39 +45,45 @@ def _engine() -> Engine:
 engine = _engine()
 
 
+def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params=params or {})
+
+
 @st.cache_data(show_spinner=False)
 def _crosswalk_count() -> int:
-    with engine.connect() as conn:
-        n = pd.read_sql(text("SELECT COUNT(*) AS n FROM crosswalk"), conn).iloc[0]["n"]
-    return int(n)
+    return int(_read_sql("SELECT COUNT(*) AS n FROM crosswalk").iloc[0]["n"])
 
 
 @st.cache_data(show_spinner=False)
 def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
-    q = """
-        SELECT DISTINCT vendor_id
-        FROM crosswalk
-        WHERE vendor_id IS NOT NULL
-          AND ( :q = '' OR vendor_id ILIKE :like )
-        ORDER BY vendor_id
-        LIMIT :lim
-    """
-    params = {"q": filter_q.strip(), "like": f"%{filter_q.strip()}%", "lim": limit}
-    with engine.connect() as conn:
-        df = pd.read_sql(text(q), conn, params=params)
+    """Return vendor list with '' (GLOBAL) first; no LIKE when filter is blank."""
+    filter_q = (filter_q or "").strip()
+    if filter_q:
+        q = """
+            SELECT DISTINCT vendor_id
+            FROM crosswalk
+            WHERE vendor_id IS NOT NULL AND vendor_id ILIKE :like
+            ORDER BY vendor_id
+            LIMIT :lim
+        """
+        params = {"like": f"%{filter_q}%", "lim": limit}
+    else:
+        q = """
+            SELECT DISTINCT vendor_id
+            FROM crosswalk
+            WHERE vendor_id IS NOT NULL
+            ORDER BY vendor_id
+            LIMIT :lim
+        """
+        params = {"lim": limit}
+    df = _read_sql(q, params)
     vals = [str(x or "") for x in df["vendor_id"].tolist()]
-    # GLOBAL (blank) always first
     if "" not in vals:
         vals.insert(0, "")
     else:
-        # move '' to front
         vals = [""] + [v for v in vals if v != ""]
     return vals
-
-
-def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
-    with engine.connect() as conn:
-        return pd.read_sql(text(query), conn, params=params or {})
 
 
 # =============================================================================
@@ -95,7 +101,7 @@ with st.expander("How to use", expanded=False):
 st.toggle("Debug logs", key="_debug", value=False)
 
 try:
-    st.success(f"Crosswalk loaded (rows: { _crosswalk_count():, }) ✅")
+    st.success(f"Crosswalk loaded (rows: {_crosswalk_count():,}) ✅")
 except Exception as e:
     st.warning(f"Ne mogu pročitati broj redaka crosswalka: {e}")
 
@@ -109,13 +115,12 @@ with cc1:
     vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
 with cc2:
     if st.button("Refresh list", key="btn_refresh_vendors"):
-        st.cache_data.clear()  # osvježi cache za vendor listu
+        st.cache_data.clear()
 
 vendors = _fetch_vendors(vendor_filter)
-# zadrži prethodni odabir ako još postoji
 prev_vendor = st.session_state.get("vendor_select", "")
 if prev_vendor not in vendors:
-    prev_vendor = ""  # pad na GLOBAL
+    prev_vendor = ""  # GLOBAL
 
 vendor = st.selectbox(
     " ", options=vendors,
@@ -128,7 +133,7 @@ st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
 
 
 # =============================================================================
-# Upload datoteke
+# Upload invoice
 # =============================================================================
 st.subheader("1) Upload supplier invoice (Excel / CSV / PDF)")
 uploaded = st.file_uploader("Drag & drop ili odaberi datoteku", type=["xlsx", "xls", "csv", "pdf"], key="uploader")
@@ -174,11 +179,10 @@ if uploaded is not None:
 
 
 # =============================================================================
-# 2) Map to TOW  (rezultat zaključavamo u session_state)
+# 2) Map to TOW (rezultat perzistira i može se zaključati)
 # =============================================================================
 st.subheader("2) Map to TOW")
 
-# Tipke za kontrolu stanja rezultata
 c1, c2 = st.columns([1, 1])
 with c1:
     if st.button("Clear result", key="btn_clear_map"):
@@ -225,13 +229,13 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             st.session_state["matched_cols"] = list(st.session_state["matched"].columns)
             st.session_state["unmatched_cols"] = list(st.session_state["unmatched"].columns)
             st.session_state["mapped_ready"] = True
-            st.session_state["map_locked"] = True  # auto-lock nakon mapiranja
+            st.session_state["map_locked"] = True
             st.toast("Mapping complete ✅", icon="✅")
         except Exception as e:
             st.error(f"Mapping failed: {e}")
             st.session_state["mapped_ready"] = False
 
-# Prikaz rezultata (ostaje vidljiv dok god je mapped_ready i lock aktivan)
+# Show result if available
 if st.session_state.get("mapped_ready", False):
     matched = st.session_state["matched"]
     unmatched = st.session_state["unmatched"]
@@ -243,7 +247,7 @@ if st.session_state.get("mapped_ready", False):
     with st.expander("Preview: Unmatched (first 200 rows)", expanded=False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
-    # Stari export
+    # Old/simple export
     st.download_button(
         "Download Excel (Matched + Unmatched)",
         data=_excel_bytes({"Matched": matched, "Unmatched": unmatched}),
@@ -252,9 +256,8 @@ if st.session_state.get("mapped_ready", False):
         key="dl_simple_both",
     )
 
-    # Custom export (multiselecti ne ruše rezultat)
+    # Custom export
     st.subheader("3) Custom Excel export")
-
     tabs = st.tabs(["Matched", "Unmatched", "Both (custom)"])
 
     with tabs[0]:
@@ -301,7 +304,6 @@ if st.session_state.get("mapped_ready", False):
             data_dict["Matched"] = matched[cols_m_both] if cols_m_both else matched
         if not unmatched.empty:
             data_dict["Unmatched"] = unmatched[cols_u_both] if cols_u_both else unmatched
-
         st.download_button(
             "⬇️ Download Both (custom columns & order)",
             data=_excel_bytes(data_dict),
@@ -314,18 +316,23 @@ else:
 
 
 # =============================================================================
-# Admin (PIN gate)
+# Admin (PIN -> unlock) + Queue/Direct + Live search (NEON DB)
 # =============================================================================
 st.divider()
 st.subheader("Admin - Add / Queue / Apply Mappings - Live search")
 
-# --- PIN gate (kao u originalu: input + Unlock gumb) ---
-c_pin1, c_pin2 = st.columns([5, 1])
+# --- PIN gate (ENV/Secrets; trim) ---
+expected_pin = os.getenv("ADMIN_PIN", st.secrets.get("ADMIN_PIN", ""))
+expected_pin = str(expected_pin).strip()
+
+c_pin1, c_pin2, c_pin3 = st.columns([5, 1, 2])
 with c_pin1:
     pin_in = st.text_input("Admin PIN", type="password", key="admin_pin_input")
 with c_pin2:
     if st.button("Unlock", key="btn_unlock"):
-        st.session_state["admin_unlocked"] = (pin_in == st.secrets.get("ADMIN_PIN", ""))
+        st.session_state["admin_unlocked"] = (str(pin_in).strip() == expected_pin)
+with c_pin3:
+    st.caption(f"PIN configured: {'✅' if expected_pin else '❌'}")
 
 if not st.session_state.get("admin_unlocked", False):
     st.info("Admin locked. Unesi PIN i klikni **Unlock**.")
@@ -333,7 +340,7 @@ if not st.session_state.get("admin_unlocked", False):
 
 st.success("Admin unlocked.")
 
-# ============== ADD A SINGLE MAPPING (Queue CSV ili Direct upsert) ===========
+# ============== ADD A SINGLE MAPPING ==============
 st.markdown("### Add a single mapping")
 
 with st.form("admin_add_single"):
@@ -363,7 +370,6 @@ with st.form("admin_add_single"):
             st.error("supplier_id is required.")
         else:
             if action.startswith("Queue"):
-                # držimo queue u session_state i nudimo CSV download – kao u originalu
                 queue_cols = ["vendor_id", "supplier_id", "tow_code"]
                 if "updates_df" not in st.session_state:
                     st.session_state["updates_df"] = pd.DataFrame(columns=queue_cols)
@@ -373,7 +379,6 @@ with st.form("admin_add_single"):
                 )
                 st.success("Queued. (updates.csv u dnu sekcije)")
             else:
-                # direktno u NEON (upsert)
                 try:
                     with engine.begin() as conn:
                         conn.execute(text("""
@@ -386,14 +391,13 @@ with st.form("admin_add_single"):
                 except Exception as e:
                     st.error(f"DB error: {e}")
 
-# --- Queue CSV “widget” (download / clear / apply) ---------------------------
+# --- Queue CSV (download/apply/clear) ---
 st.markdown("### Apply queued CSV to DB")
 
 if "updates_df" in st.session_state and not st.session_state["updates_df"].empty:
     dfq = st.session_state["updates_df"].copy()
     st.dataframe(dfq, use_container_width=True, height=200)
 
-    # Download updates.csv
     qcsv = dfq.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download updates.csv",
@@ -420,8 +424,6 @@ if "updates_df" in st.session_state and not st.session_state["updates_df"].empty
                             "t": str(r.get("tow_code", "")),
                         })
                 st.success("updates.csv applied to DB.")
-                # po želji: očisti queue nakon apply-a
-                # st.session_state["updates_df"] = pd.DataFrame(columns=["vendor_id","supplier_id","tow_code"])
             except Exception as e:
                 st.error(f"Apply failed: {e}")
     with c_apply2:
@@ -431,33 +433,32 @@ if "updates_df" in st.session_state and not st.session_state["updates_df"].empty
 else:
     st.caption("No updates.csv yet.")
 
-# ======================== LIVE SEARCH / INSPECT ==============================
+# ======================== LIVE SEARCH ========================
 st.markdown("### Live search / inspect")
 
 c_f1, c_f2, c_f3 = st.columns([2.2, 2.2, 1.2])
 with c_f1:
-    vendor_filter = st.text_input("vendor_id filter (blank = ALL)", value=st.session_state.get("ls_vendor", ""))
+    vendor_filter_live = st.text_input("vendor_id filter (blank = ALL)", value=st.session_state.get("ls_vendor", ""))
 with c_f2:
-    supp_filter = st.text_input("supplier_id search (exact or contains)", value=st.session_state.get("ls_supplier", ""))
+    supp_filter_live = st.text_input("supplier_id search (exact or contains)", value=st.session_state.get("ls_supplier", ""))
 with c_f3:
     exact = st.checkbox("Exact supplier match", value=st.session_state.get("ls_exact", False))
 
-st.session_state["ls_vendor"] = vendor_filter
-st.session_state["ls_supplier"] = supp_filter
+st.session_state["ls_vendor"] = vendor_filter_live
+st.session_state["ls_supplier"] = supp_filter_live
 st.session_state["ls_exact"] = exact
 
-# build WHERE
 clauses, params = [], {}
-if vendor_filter != "":
+if vendor_filter_live != "":
     clauses.append("vendor_id = :v1")
-    params["v1"] = vendor_filter
-if supp_filter != "":
+    params["v1"] = vendor_filter_live
+if supp_filter_live != "":
     if exact:
         clauses.append("supplier_id = :s1")
-        params["s1"] = supp_filter
+        params["s1"] = supp_filter_live
     else:
         clauses.append("supplier_id ILIKE :s1")
-        params["s1"] = f"%{supp_filter}%"
+        params["s1"] = f"%{supp_filter_live}%"
 
 where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 q = f"""
@@ -473,7 +474,6 @@ try:
     st.caption(f"500 results shown (max 500) — shown: {len(df_res):,}")
     st.dataframe(df_res, use_container_width=True, height=260)
 
-    # Prefill admin form
     st.markdown("##### Pick row as prefill")
     c_idx, c_btn = st.columns([1, 2])
     with c_idx:
@@ -485,6 +485,6 @@ try:
                 st.session_state["vendor_prefill"] = str(row.get("vendor_id", "") or "")
                 st.session_state["supplier_prefill"] = str(row.get("supplier_id", "") or "")
                 st.session_state["tow_prefill"] = str(row.get("tow_code", "") or "")
-                st.success("Prefilled. Scroll up to 'Add a single mapping'.")
+                st.success("Prefilled — skrolaj gore do 'Add a single mapping'.")
 except Exception as e:
     st.error(f"Search failed: {e}")
