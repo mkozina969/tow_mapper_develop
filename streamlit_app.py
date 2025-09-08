@@ -317,112 +317,174 @@ else:
 # Admin (PIN gate)
 # =============================================================================
 st.divider()
-st.subheader("Admin: Add / Queue / Apply Mappings + Live search")
+st.subheader("Admin - Add / Queue / Apply Mappings - Live search")
 
-admin_ok = False
-pin_required = st.secrets.get("ADMIN_PIN", "")
+# --- PIN gate (kao u originalu: input + Unlock gumb) ---
+c_pin1, c_pin2 = st.columns([5, 1])
+with c_pin1:
+    pin_in = st.text_input("Admin PIN", type="password", key="admin_pin_input")
+with c_pin2:
+    if st.button("Unlock", key="btn_unlock"):
+        st.session_state["admin_unlocked"] = (pin_in == st.secrets.get("ADMIN_PIN", ""))
 
-if pin_required:
-    pin_in = st.text_input("Admin PIN", type="password", value="", key="admin_pin_in")
-    if pin_in == pin_required:
-        admin_ok = True
-    else:
-        st.info("Unesi ispravan PIN za pristup admin alatima.")
-else:
-    admin_ok = True  # ako nema PIN-a u secrets, pusti
+if not st.session_state.get("admin_unlocked", False):
+    st.info("Admin locked. Unesi PIN i klikni **Unlock**.")
+    st.stop()
 
-if admin_ok:
-    # 1) Upsert single
-    with st.form("add_single"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            vendor_in = st.text_input("Vendor ('' = GLOBAL)", value="")
-        with c2:
-            supp_in = st.text_input("Supplier code", value="")
-        with c3:
-            tow_in = st.text_input("TOW code", value="")
-        if st.form_submit_button("Upsert mapping"):
+st.success("Admin unlocked.")
+
+# ============== ADD A SINGLE MAPPING (Queue CSV ili Direct upsert) ===========
+st.markdown("### Add a single mapping")
+
+with st.form("admin_add_single"):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        vendor_in = st.text_input("vendor_id (leave blank for GLOBAL)", value=st.session_state.get("vendor_prefill", ""))
+    with c2:
+        supp_in = st.text_input("supplier_id", value=st.session_state.get("supplier_prefill", ""))
+    with c3:
+        tow_in = st.text_input("tow_code", value=st.session_state.get("tow_prefill", ""))
+
+    st.caption("Action…")
+    action = st.radio(
+        label="Action…",
+        options=["Queue (downloadable CSV)", "Directly to DB (upsert)"],
+        horizontal=True,
+        key="admin_add_action"
+    )
+
+    submitted = st.form_submit_button("Add")
+    if submitted:
+        v = (vendor_in or "").strip()
+        s = (supp_in or "").strip()
+        t = (tow_in or "").strip()
+
+        if not s:
+            st.error("supplier_id is required.")
+        else:
+            if action.startswith("Queue"):
+                # držimo queue u session_state i nudimo CSV download – kao u originalu
+                queue_cols = ["vendor_id", "supplier_id", "tow_code"]
+                if "updates_df" not in st.session_state:
+                    st.session_state["updates_df"] = pd.DataFrame(columns=queue_cols)
+                st.session_state["updates_df"] = pd.concat(
+                    [st.session_state["updates_df"], pd.DataFrame([{"vendor_id": v, "supplier_id": s, "tow_code": t}])],
+                    ignore_index=True
+                )
+                st.success("Queued. (updates.csv u dnu sekcije)")
+            else:
+                # direktno u NEON (upsert)
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                            INSERT INTO crosswalk (vendor_id, supplier_id, tow_code)
+                            VALUES (:v, :s, :t)
+                            ON CONFLICT (vendor_id, supplier_id)
+                            DO UPDATE SET tow_code = EXCLUDED.tow_code
+                        """), {"v": v, "s": s, "t": t})
+                    st.success("Upsert OK.")
+                except Exception as e:
+                    st.error(f"DB error: {e}")
+
+# --- Queue CSV “widget” (download / clear / apply) ---------------------------
+st.markdown("### Apply queued CSV to DB")
+
+if "updates_df" in st.session_state and not st.session_state["updates_df"].empty:
+    dfq = st.session_state["updates_df"].copy()
+    st.dataframe(dfq, use_container_width=True, height=200)
+
+    # Download updates.csv
+    qcsv = dfq.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download updates.csv",
+        data=qcsv,
+        file_name="updates.csv",
+        mime="text/csv",
+        key="dl_updates_csv"
+    )
+
+    c_apply1, c_apply2 = st.columns([1, 1])
+    with c_apply1:
+        if st.button("Apply updates.csv to DB", key="btn_apply_updates"):
             try:
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        INSERT INTO crosswalk (vendor_id, supplier_id, tow_code)
-                        VALUES (:v, :s, :t)
-                        ON CONFLICT (vendor_id, supplier_id)
-                        DO UPDATE SET tow_code = EXCLUDED.tow_code
-                    """), {"v": vendor_in.strip(), "s": supp_in.strip(), "t": tow_in.strip()})
-                st.success("Mapping upserted.")
-                st.cache_data.clear()  # osvježi vendor listu
-            except Exception as e:
-                st.error(f"Upsert failed: {e}")
-
-    # 2) Queue CSV
-    st.caption("Queue iz CSV-a (kolone: vendor_id, supplier_id, tow_code)")
-    queue_file = st.file_uploader("Upload CSV za queue", type=["csv"], key="queue_csv")
-    if queue_file is not None:
-        try:
-            dfq = pd.read_csv(queue_file)
-            st.dataframe(dfq.head(200), use_container_width=True, height=220)
-            if st.button("Insert into queue", key="btn_queue_insert"):
                 with engine.begin() as conn:
                     for _, r in dfq.iterrows():
                         conn.execute(text("""
-                            INSERT INTO mapping_queue (vendor_id, supplier_id, tow_code, status)
-                            VALUES (:v, :s, :t, 'PENDING')
+                            INSERT INTO crosswalk (vendor_id, supplier_id, tow_code)
+                            VALUES (:v, :s, :t)
+                            ON CONFLICT (vendor_id, supplier_id)
+                            DO UPDATE SET tow_code = EXCLUDED.tow_code
                         """), {
                             "v": str(r.get("vendor_id", "")),
                             "s": str(r.get("supplier_id", "")),
                             "t": str(r.get("tow_code", "")),
                         })
-                st.success("Queued.")
-        except Exception as e:
-            st.error(f"Queue import failed: {e}")
+                st.success("updates.csv applied to DB.")
+                # po želji: očisti queue nakon apply-a
+                # st.session_state["updates_df"] = pd.DataFrame(columns=["vendor_id","supplier_id","tow_code"])
+            except Exception as e:
+                st.error(f"Apply failed: {e}")
+    with c_apply2:
+        if st.button("Clear queued items", key="btn_clear_updates"):
+            st.session_state["updates_df"] = pd.DataFrame(columns=["vendor_id", "supplier_id", "tow_code"])
+            st.info("Queue cleared.")
+else:
+    st.caption("No updates.csv yet.")
 
-    # 3) Apply queue
-    if st.button("Apply queue → crosswalk", key="btn_apply_queue"):
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("""
-                    INSERT INTO crosswalk (vendor_id, supplier_id, tow_code)
-                    SELECT vendor_id, supplier_id, COALESCE(tow_code, '')
-                    FROM mapping_queue
-                    WHERE status = 'PENDING'
-                    ON CONFLICT (vendor_id, supplier_id)
-                    DO UPDATE SET tow_code = EXCLUDED.tow_code
-                """))
-                conn.execute(text("UPDATE mapping_queue SET status='APPLIED' WHERE status='PENDING'"))
-            st.success("Queue applied.")
-            st.cache_data.clear()  # refresh vendors
-        except Exception as e:
-            st.error(f"Apply queue failed: {e}")
+# ======================== LIVE SEARCH / INSPECT ==============================
+st.markdown("### Live search / inspect")
 
-    # 4) Live search
-    with st.expander("Live search crosswalk", expanded=False):
-        q_vendor = st.text_input("Vendor ('' = GLOBAL) — filter", value="", key="ls_vendor")
-        q_supplier = st.text_input("Supplier contains — filter", value="", key="ls_supplier")
-        q_tow = st.text_input("TOW contains — filter", value="", key="ls_tow")
+c_f1, c_f2, c_f3 = st.columns([2.2, 2.2, 1.2])
+with c_f1:
+    vendor_filter = st.text_input("vendor_id filter (blank = ALL)", value=st.session_state.get("ls_vendor", ""))
+with c_f2:
+    supp_filter = st.text_input("supplier_id search (exact or contains)", value=st.session_state.get("ls_supplier", ""))
+with c_f3:
+    exact = st.checkbox("Exact supplier match", value=st.session_state.get("ls_exact", False))
 
-        clauses, params = [], {}
-        if q_vendor != "":
-            clauses.append("vendor_id = :v1")
-            params["v1"] = q_vendor
-        if q_supplier != "":
-            clauses.append("supplier_id ILIKE :s1")
-            params["s1"] = f"%{q_supplier}%"
-        if q_tow != "":
-            clauses.append("tow_code ILIKE :t1")
-            params["t1"] = f"%{q_tow}%"
+st.session_state["ls_vendor"] = vendor_filter
+st.session_state["ls_supplier"] = supp_filter
+st.session_state["ls_exact"] = exact
 
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        q = f"""
-            SELECT vendor_id, supplier_id, tow_code
-            FROM crosswalk
-            {where}
-            ORDER BY vendor_id, supplier_id
-            LIMIT 500
-        """
-        try:
-            df_res = _read_sql(q, params)
-            st.caption(f"{len(df_res)} result(s) shown (max 500)")
-            st.dataframe(df_res, use_container_width=True, height=260)
-        except Exception as e:
-            st.error(f"Search failed: {e}")
+# build WHERE
+clauses, params = [], {}
+if vendor_filter != "":
+    clauses.append("vendor_id = :v1")
+    params["v1"] = vendor_filter
+if supp_filter != "":
+    if exact:
+        clauses.append("supplier_id = :s1")
+        params["s1"] = supp_filter
+    else:
+        clauses.append("supplier_id ILIKE :s1")
+        params["s1"] = f"%{supp_filter}%"
+
+where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+q = f"""
+    SELECT vendor_id, supplier_id, tow_code
+    FROM crosswalk
+    {where}
+    ORDER BY vendor_id, supplier_id
+    LIMIT 500
+"""
+
+try:
+    df_res = _read_sql(q, params)
+    st.caption(f"500 results shown (max 500) — shown: {len(df_res):,}")
+    st.dataframe(df_res, use_container_width=True, height=260)
+
+    # Prefill admin form
+    st.markdown("##### Pick row as prefill")
+    c_idx, c_btn = st.columns([1, 2])
+    with c_idx:
+        idx = st.number_input(" ", min_value=0, max_value=max(len(df_res)-1, 0), value=0, step=1, label_visibility="collapsed")
+    with c_btn:
+        if st.button("Prefill Admin form from row", key="btn_prefill"):
+            if not df_res.empty:
+                row = df_res.iloc[int(idx)]
+                st.session_state["vendor_prefill"] = str(row.get("vendor_id", "") or "")
+                st.session_state["supplier_prefill"] = str(row.get("supplier_id", "") or "")
+                st.session_state["tow_prefill"] = str(row.get("tow_code", "") or "")
+                st.success("Prefilled. Scroll up to 'Add a single mapping'.")
+except Exception as e:
+    st.error(f"Search failed: {e}")
