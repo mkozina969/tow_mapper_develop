@@ -97,6 +97,7 @@ def _load_vendor_names() -> Dict[str, str]:
     df["vendor_name"] = df["vendor_name"].astype(str).fillna("").str.strip()
     return dict(zip(df["vendor_id"], df["vendor_name"]))
 
+
 # =============================================================================
 # Header
 # =============================================================================
@@ -324,52 +325,53 @@ if st.session_state.get("mapped_ready", False):
     default_order = preferred_first + rest
 
     # Column selection + ORDER editor (robust)
-cfg_default = pd.DataFrame({
-    "column": default_order,
-    "include": True,
-    "order": list(range(1, len(default_order) + 1)),
-})
+    cfg_default = pd.DataFrame({
+        "column": default_order,
+        "include": True,
+        "order": list(range(1, len(default_order) + 1)),
+    })
 
-st.markdown("### Choose export columns & order")
+    st.markdown("### Choose export columns & order")
 
-# Common kwargs
-_editor_kwargs = dict(
-    hide_index=True,
-    use_container_width=True,
-)
-
-# Try advanced editor first; if TypeError (older/newer Streamlit), fall back.
-try:
-    cfg = st.data_editor(
-        cfg_default,
-        **_editor_kwargs,
-        column_config={
-            "column": st.column_config.TextColumn("Column", disabled=True),
-            "include": st.column_config.CheckboxColumn("Include"),
-            "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
-        },
-        help="Označi kolone i dodijeli redoslijed (1..N)."
+    # Common kwargs
+    _editor_kwargs = dict(
+        hide_index=True,
+        use_container_width=True,
     )
-except TypeError:
-    st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
-    cfg = st.data_editor(cfg_default, **_editor_kwargs)
 
-# Compute ordered column list safely
-cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
-cfg = cfg.dropna(subset=["order"])
-cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
-export_cols = cfg["column"].tolist()
+    # Try advanced editor first; if TypeError (older/newer Streamlit), fall back.
+    try:
+        cfg = st.data_editor(
+            cfg_default,
+            **_editor_kwargs,
+            column_config={
+                "column": st.column_config.TextColumn("Column", disabled=True),
+                "include": st.column_config.CheckboxColumn("Include"),
+                "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
+            },
+            help="Označi kolone i dodijeli redoslijed (1..N).",
+        )
+    except TypeError:
+        # Minimal editor (works across versions)
+        st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
+        cfg = st.data_editor(cfg_default, **_editor_kwargs)
 
-# Fallback: if nothing selected, keep default order
-if not export_cols:
-    export_cols = default_order
+    # Compute ordered column list safely
+    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
+    cfg = cfg.dropna(subset=["order"])
+    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
+    export_cols = cfg["column"].tolist()
 
-def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-    cols_in_df = [c for c in export_cols if c in df.columns]
-    return df[cols_in_df] if cols_in_df else df
+    # Fallback: if nothing selected, keep default order
+    if not export_cols:
+        export_cols = default_order
 
-matched_out = _apply_selection(matched_en)
-unmatched_out = _apply_selection(unmatched_en)
+    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+        cols_in_df = [c for c in export_cols if c in df.columns]
+        return df[cols_in_df] if cols_in_df else df
+
+    matched_out = _apply_selection(matched_en)
+    unmatched_out = _apply_selection(unmatched_en)
 
     with st.expander("Preview (custom): Matched", expanded=False):
         st.dataframe(matched_out.head(200), use_container_width=True)
