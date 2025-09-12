@@ -96,7 +96,43 @@ def _load_vendor_names() -> Dict[str, str]:
     df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
     df["vendor_name"] = df["vendor_name"].astype(str).fillna("").str.strip()
     return dict(zip(df["vendor_id"], df["vendor_name"]))
+@st.cache_data(show_spinner=False)
+def _columns_editor(default_order: list[str]) -> list[str]:
+    """
+    Show a robust column chooser that works across Streamlit versions.
+    Returns the ordered list of columns to export.
+    """
+    cfg_default = pd.DataFrame({
+        "column": default_order,
+        "include": True,
+        "order": list(range(1, len(default_order) + 1)),
+    })
 
+    st.markdown("### Choose export columns & order")
+
+    _editor_kwargs = dict(hide_index=True, use_container_width=True)
+
+    try:
+        cfg = st.data_editor(
+            cfg_default,
+            **_editor_kwargs,
+            column_config={
+                "column": st.column_config.TextColumn("Column", disabled=True),
+                "include": st.column_config.CheckboxColumn("Include"),
+                "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
+            },
+            help="Označi kolone i dodijeli redoslijed (1..N).",
+        )
+    except TypeError:
+        # Fallback for environments where column_config signature differs
+        st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
+        cfg = st.data_editor(cfg_default, **_editor_kwargs)
+
+    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
+    cfg = cfg.dropna(subset=["order"])
+    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
+    export_cols = cfg["column"].tolist()
+    return export_cols
 
 # =============================================================================
 # Header
