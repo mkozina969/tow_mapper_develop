@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import pdfplumber
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -30,20 +31,32 @@ engine = get_engine()
 # =============================================================================
 def ensure_schema(engine: Engine) -> tuple[str, str, Optional[str]]:
     """
-    Ensure crosswalk table + unique index exist.
-    Return canonical names used by the app: (supplier_col, tow_col, vendor_col_or_None)
+    Ensure crosswalk table/constraints exist.
+    Returns canonical names used by the app: (supplier_col, tow_col, vendor_col_or_None)
     """
     with engine.begin() as conn:
+        # Base table (vendor_id NOT NULL; we use 'GLOBAL' as sentinel for blank)
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS crosswalk (
             tow_code    TEXT NOT NULL,
             supplier_id TEXT NOT NULL,
-            vendor_id   TEXT
+            vendor_id   TEXT NOT NULL
         )
         """))
+        # Unique (vendor_id, supplier_id) — idempotent via DO block
         conn.execute(text("""
-        CREATE UNIQUE INDEX IF NOT EXISTS ix_crosswalk_vendor_supplier
-        ON crosswalk (vendor_id, supplier_id)
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_crosswalk_vendor_supplier'
+                  AND conrelid = 'crosswalk'::regclass
+            ) THEN
+                ALTER TABLE crosswalk
+                ADD CONSTRAINT uq_crosswalk_vendor_supplier UNIQUE (vendor_id, supplier_id);
+            END IF;
+        END
+        $$;
         """))
     return ("supplier_id", "tow_code", "vendor_id")
 
@@ -54,6 +67,69 @@ def df_read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
 def exec_sql(sql: str, params: dict | None = None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
+
+# =============================================================================
+# Small pandas helper (compat: pandas 1.x and 2.x)
+# =============================================================================
+def df_map(df: pd.DataFrame, func):
+    """Element-wise map that works on all pandas versions."""
+    return df.map(func) if hasattr(pd.DataFrame, "map") else df.applymap(func)
+
+# =============================================================================
+# PDF table extraction helpers
+# =============================================================================
+def extract_pdf_tables(file):
+    """
+    Return {"scanned": bool, "tables": list[{page:int, strategy:str, rows:list[list[str]]}]}
+    Each 'rows' contains the raw table including a header row (at some index).
+    """
+    out = []
+    strategies = [
+        ("lines", {"vertical_strategy": "lines", "horizontal_strategy": "lines",
+                   "intersection_x_tolerance": 5, "intersection_y_tolerance": 5}),
+        ("text",  {"vertical_strategy": "text",  "horizontal_strategy": "text",
+                   "text_x_tolerance": 2, "text_y_tolerance": 2}),
+    ]
+    file.seek(0)
+    with pdfplumber.open(file) as pdf:
+        any_text = False
+        for pnum, page in enumerate(pdf.pages, start=1):
+            try:
+                if (page.extract_text() or "").strip():
+                    any_text = True
+            except Exception:
+                pass
+            for name, ts in strategies:
+                try:
+                    tables = page.extract_tables(table_settings=ts) or []
+                except Exception:
+                    tables = []
+                for t in tables:
+                    norm = []
+                    for row in t:
+                        if row is None:
+                            continue
+                        norm.append([("" if c is None else str(c)).strip() for c in row])
+                    if len(norm) >= 2 and max(len(r) for r in norm) >= 2:
+                        out.append({"page": pnum, "strategy": name, "rows": norm})
+        if not out and not any_text:
+            return {"scanned": True, "tables": []}
+    return {"scanned": False, "tables": out}
+
+def rows_to_dataframe(rows: list[list[str]], header_row_idx: int = 0) -> pd.DataFrame:
+    """Convert raw rows into a DataFrame given which row is the header."""
+    if not rows:
+        return pd.DataFrame()
+    width = max(len(r) for r in rows)
+    padded = [r + [""] * (width - len(r)) for r in rows]
+    header = [str(x or "").strip() for x in padded[header_row_idx]]
+    body = [r for i, r in enumerate(padded) if i != header_row_idx]
+    df = pd.DataFrame(body, columns=header)
+    df = df.loc[:, (df.columns.astype(str).str.strip() != "")]
+    df = df.loc[:, ~df.columns.duplicated()]
+    df = df.fillna("")
+    df = df_map(df, lambda v: str(v).replace("\n", " ").strip())
+    return df
 
 # =============================================================================
 # Crosswalk loader
@@ -75,13 +151,28 @@ def load_crosswalk() -> pd.DataFrame:
     return df
 
 # =============================================================================
+# Vendor names loader (from vendors table)
+# =============================================================================
+@st.cache_data(show_spinner=False)
+def load_vendor_names() -> dict[str, str]:
+    """Return {vendor_id -> vendor_name}. If table missing, just return {}."""
+    try:
+        df = df_read_sql("SELECT vendor_id, vendor_name FROM vendors")
+    except Exception:
+        return {}
+    df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
+    df["vendor_name"] = df["vendor_name"].astype(str).str.strip()
+    return dict(zip(df["vendor_id"], df["vendor_name"]))
+
+# =============================================================================
 # UI: Help + cache button
 # =============================================================================
 with st.expander("How to use", expanded=True):
     st.markdown("""
 1) This app reads/writes a **cloud Postgres** database → data survives restarts.  
-2) Upload a supplier invoice (Excel/CSV), choose **Vendor** and supplier code column, then **Run mapping**.  
-3) Use **Admin** to add/queue mappings and live-search the DB.
+2) Upload a supplier invoice (**Excel / CSV / PDF**), choose **Vendor** and supplier code column, then **Run mapping**.  
+3) Use **Admin** to add/queue mappings and live-search the DB.  
+4) Blank vendor is treated as **GLOBAL**, duplicates prevented by unique `(vendor_id, supplier_id)`.
 """)
 
 if st.button("♻️ Clear cache & re-run"):
@@ -89,21 +180,36 @@ if st.button("♻️ Clear cache & re-run"):
     st.rerun()
 
 # =============================================================================
-# Load crosswalk
+# Load crosswalk + vendor names
 # =============================================================================
 cw = load_crosswalk()
+vendors_map = load_vendor_names()
 st.success(
     f"Crosswalk loaded | rows: {len(cw):,} | "
     f"vendors: {cw['vendor_id'].nunique() if 'vendor_id' in cw.columns else 'N/A'}"
 )
 
 # =============================================================================
-# Vendor selector
+# Vendor selector (with names)
 # =============================================================================
 vendor = "ALL"
 if "vendor_id" in cw.columns:
-    vendors = ["ALL"] + sorted(cw["vendor_id"].dropna().unique().tolist())
-    vendor = st.selectbox("Vendor", vendors, index=0)
+    vendor_ids = sorted(cw["vendor_id"].dropna().unique().tolist())
+    options = ["ALL"] + vendor_ids
+
+    def fmt(v: str) -> str:
+        if v == "ALL":
+            return "ALL (no vendor filter)"
+        name = vendors_map.get(v)
+        return f"{v} — {name}" if name else v
+
+    vendor = st.selectbox(
+        "Vendor",
+        options,
+        index=0,
+        format_func=fmt,
+        help="Pick a vendor; GLOBAL = blank vendor"
+    )
 else:
     st.caption("No vendor_id in crosswalk → using ALL.")
 cw_for_vendor = cw if vendor == "ALL" or "vendor_id" not in cw.columns else cw[cw["vendor_id"] == vendor]
@@ -111,23 +217,81 @@ cw_for_vendor = cw if vendor == "ALL" or "vendor_id" not in cw.columns else cw[c
 # =============================================================================
 # Upload invoice
 # =============================================================================
-st.header("2) Upload supplier invoice (Excel / CSV)")
-invoice_file = st.file_uploader("Drag & drop or Browse", type=["xlsx", "xls", "csv"], accept_multiple_files=False)
+st.header("2) Upload supplier invoice (Excel / CSV / PDF)")
+invoice_file = st.file_uploader(
+    "Drag & drop or Browse",
+    type=["xlsx", "xls", "csv", "pdf"],
+    accept_multiple_files=False
+)
 
 invoice_df = None
 if invoice_file:
     try:
-        if invoice_file.name.lower().endswith((".xlsx", ".xls")):
+        name = invoice_file.name.lower()
+        if name.endswith((".xlsx", ".xls")):
             invoice_df = pd.read_excel(invoice_file, dtype=str)
+        elif name.endswith(".csv"):
+            # auto-detect delimiter , or ;
+            invoice_file.seek(0)
+            head = invoice_file.read(4096).decode("utf-8", errors="ignore")
+            sep = ";" if head.count(";") >= head.count(",") else ","
+            invoice_file.seek(0)
+            invoice_df = pd.read_csv(
+                invoice_file, engine="python", dtype=str, encoding="utf-8",
+                on_bad_lines="skip", sep=sep
+            )
+        elif name.endswith(".pdf"):
+            result = extract_pdf_tables(invoice_file)
+            if isinstance(result, dict) and result.get("scanned"):
+                st.error("This PDF looks like a scanned image (no text). OCR isn’t enabled yet. Export to CSV/Excel or share a sample and we’ll add OCR.")
+            else:
+                tables = result["tables"]
+                if not tables:
+                    st.warning("I couldn’t detect tabular data in this PDF. Try exporting the invoice to CSV/Excel.")
+                else:
+                    options = [
+                        f"Table #{i+1} | page {t['page']} | {t['strategy']} | {len(t['rows'])}x{max(len(r) for r in t['rows'])}"
+                        for i, t in enumerate(tables)
+                    ]
+                    choice = st.selectbox("Pick a table found in the PDF", options, index=0)
+                    idx = options.index(choice)
+                    chosen = tables[idx]
+
+                    max_header = min(4, len(chosen["rows"]) - 1)
+                    header_row_idx = st.number_input(
+                        "Which row is the header?", min_value=0, max_value=max_header, value=0, step=1
+                    )
+
+                    invoice_df = rows_to_dataframe(chosen["rows"], header_row_idx)
+
+                    def all_tables_to_excel_bytes():
+                        bio = BytesIO()
+                        with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+                            for i, t in enumerate(tables):
+                                df_i = rows_to_dataframe(t["rows"], header_row_idx=0)
+                                sheet = f"p{t['page']}_{t['strategy']}_{i+1}"[:31]
+                                df_i.to_excel(w, index=False, sheet_name=sheet)
+                        return bio.getvalue()
+
+                    st.download_button(
+                        "Download ALL extracted PDF tables (Excel)",
+                        data=all_tables_to_excel_bytes(),
+                        file_name="pdf_tables.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
         else:
-            invoice_df = pd.read_csv(invoice_file, engine="python", dtype=str, encoding="utf-8", on_bad_lines="skip")
+            st.error("Unsupported file type.")
+            invoice_df = None
     except Exception as e:
         st.error(f"Failed to load invoice: {e}")
         invoice_df = None
 
-    if invoice_df is not None:
+    if invoice_df is not None and not invoice_df.empty:
+        invoice_df = df_map(invoice_df, lambda v: "" if v is None else str(v))
         st.write("Preview:", invoice_df.head(10))
         st.caption(f"Rows: {len(invoice_df):,} | Columns: {list(invoice_df.columns)}")
+    elif invoice_df is not None:
+        st.warning("Loaded the file but didn’t find any rows.")
 
 # =============================================================================
 # Mapping
@@ -145,7 +309,7 @@ def suggest_supplier_column(cols):
             return i
     return 0
 
-if invoice_df is not None:
+if invoice_df is not None and not invoice_df.empty:
     idx = suggest_supplier_column(invoice_df.columns)
     code_col = st.selectbox("Which column contains the SUPPLIER code?", options=list(invoice_df.columns), index=idx)
 
@@ -194,10 +358,10 @@ else:
 # Admin helpers (upsert/queue)
 # =============================================================================
 def upsert_mapping(vendor_id: str | None, supplier_id: str, tow_code: str) -> None:
+    # normalize (use .upper() on Python strings)
     supplier_id = str(supplier_id or "").strip().upper()
     tow_code    = str(tow_code or "").strip()
-    vendor_id   = (str(vendor_id or "GLOBAL").strip().upper())  # <-- was None; now default to GLOBAL
-    ...
+    vendor_id   = str(vendor_id or "GLOBAL").strip().upper()  # GLOBAL sentinel for blank vendor
 
     sql = """
     INSERT INTO crosswalk (tow_code, supplier_id, vendor_id)
@@ -213,7 +377,11 @@ def append_pending_csv(vendor_id: str, supplier_id: str, tow_code: str) -> None:
     with open("updates.csv", "a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["tow_code","supplier_id","vendor_id"])
         if write_header: w.writeheader()
-        w.writerow({"tow_code": tow_code, "supplier_id": supplier_id, "vendor_id": vendor_id})
+        w.writerow({
+            "tow_code": str(tow_code or "").strip(),
+            "supplier_id": str(supplier_id or "").strip().upper(),
+            "vendor_id": (str(vendor_id or "GLOBAL").strip().upper())
+        })
 
 def apply_pending(file_path: str = "updates.csv") -> int:
     p = Path(file_path)
@@ -221,14 +389,14 @@ def apply_pending(file_path: str = "updates.csv") -> int:
     df = pd.read_csv(p, dtype=str).fillna("")
     n = 0
     for _, r in df.iterrows():
-        upsert_mapping(r.get("vendor_id",""), r.get("supplier_id",""), r.get("tow_code",""))
+        upsert_mapping(r.get("vendor_id","GLOBAL"), r.get("supplier_id",""), r.get("tow_code",""))
         n += 1
     return n
 
 # =============================================================================
 # Admin (PIN-gated) + Live search
 # =============================================================================
-with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", expanded=False):
+with st.expander("🔐 Admin • Add / Queue • Apply • Live search", expanded=False):
     default_pin = os.environ.get("ST_ADMIN_PIN") or st.secrets.get("admin_pin", "letmein")
     col_pin, col_btn = st.columns([3,1])
     with col_pin:
@@ -248,7 +416,7 @@ with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", 
         with st.form("admin_add_one"):
             c1, c2, c3 = st.columns(3)
             with c1:
-                vendor_id_in = st.text_input("vendor_id", value=st.session_state.pop("prefill_vendor_id",""), placeholder="e.g. DOB0000025")
+                vendor_id_in = st.text_input("vendor_id (leave blank for GLOBAL)", value=st.session_state.pop("prefill_vendor_id",""), placeholder="e.g. DOB0000025 or leave blank")
             with c2:
                 supplier_id_in = st.text_input("supplier_id", value=st.session_state.pop("prefill_supplier_id",""), placeholder="e.g. 0986356023")
             with c3:
@@ -258,15 +426,15 @@ with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", 
             submitted = st.form_submit_button("Add")
             if submitted:
                 if not (supplier_id_in and tow_code_in):
-                    st.error("supplier_id and tow_code are required (vendor_id optional).")
+                    st.error("supplier_id and tow_code are required (vendor_id optional; blank = GLOBAL).")
                 else:
                     try:
                         if mode.startswith("Queue"):
                             append_pending_csv(vendor_id_in, supplier_id_in, tow_code_in)
-                            st.success(f"Queued locally (updates.csv): {vendor_id_in} / {supplier_id_in} → {tow_code_in}")
+                            st.success(f"Queued locally (updates.csv): {(vendor_id_in or 'GLOBAL').upper()} / {supplier_id_in} → {tow_code_in}")
                         else:
                             upsert_mapping(vendor_id_in, supplier_id_in, tow_code_in)
-                            st.success(f"Upserted to DB: {vendor_id_in} / {supplier_id_in} → {tow_code_in}")
+                            st.success(f"Upserted to DB: {(vendor_id_in or 'GLOBAL').upper()} / {supplier_id_in} → {tow_code_in}")
                             st.cache_data.clear()
                     except Exception as e:
                         st.exception(e)
@@ -297,19 +465,33 @@ with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", 
         with c3:
             exact = st.checkbox("Exact supplier match", value=True)
 
+        # Build WHERE on aliased columns
         clauses, params = [], {}
         if vendor_q.strip():
-            clauses.append("vendor_id = :ven")
+            clauses.append("c.vendor_id = :ven")
             params["ven"] = vendor_q.strip().upper()
         if supplier_q.strip():
             if exact:
-                clauses.append("supplier_id = :sup")
+                clauses.append("c.supplier_id = :sup")
                 params["sup"] = supplier_q.strip().upper()
             else:
-                clauses.append("supplier_id LIKE :sup")
+                clauses.append("c.supplier_id LIKE :sup")
                 params["sup"] = f"%{supplier_q.strip().upper()}%"
+
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        q = f"SELECT vendor_id, supplier_id, tow_code FROM crosswalk{where} ORDER BY vendor_id, supplier_id LIMIT 500"
+
+        q = f"""
+        SELECT
+          c.vendor_id,
+          v.vendor_name,
+          c.supplier_id,
+          c.tow_code
+        FROM crosswalk c
+        LEFT JOIN vendors v ON v.vendor_id = c.vendor_id
+        {where}
+        ORDER BY c.vendor_id, c.supplier_id
+        LIMIT 500
+        """
         df_res = df_read_sql(q, params)
         st.caption(f"{len(df_res)} result(s) shown (max 500)")
         st.dataframe(df_res, use_container_width=True, height=260)
@@ -322,4 +504,4 @@ with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", 
                     st.session_state["prefill_vendor_id"] = str(row.get("vendor_id","") or "")
                     st.session_state["prefill_supplier_id"] = str(row.get("supplier_id","") or "")
                     st.session_state["prefill_tow_code"] = str(row.get("tow_code","") or "")
-                    st.success("Prefilled. Scroll up to 'Add a single mapping'.
+                    st.success("Prefilled. Scroll up to 'Add a single mapping'.")
