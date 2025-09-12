@@ -370,66 +370,37 @@ if st.session_state.get("mapped_ready", False):
     default_order = preferred_first + rest
 
     # Column selection + ORDER editor (robust)
-    cfg_default = pd.DataFrame({
-        "column": default_order,
-        "include": True,
-        "order": list(range(1, len(default_order) + 1)),
-    })
+    # Build preferred order
+all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
+preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
+rest = [c for c in all_cols if c not in preferred_first]
+default_order = preferred_first + rest
 
-    st.markdown("### Choose export columns & order")
+# Get ordered column selection from the helper
+export_cols = _columns_editor(default_order)
+if not export_cols:
+    export_cols = default_order
 
-    # Common kwargs
-    _editor_kwargs = dict(
-        hide_index=True,
-        use_container_width=True,
-    )
+def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+    cols_in_df = [c for c in export_cols if c in df.columns]
+    return df[cols_in_df] if cols_in_df else df
 
-    # Try advanced editor first; if TypeError (older/newer Streamlit), fall back.
-    try:
-        cfg = st.data_editor(
-            cfg_default,
-            **_editor_kwargs,
-            column_config={
-                "column": st.column_config.TextColumn("Column", disabled=True),
-                "include": st.column_config.CheckboxColumn("Include"),
-                "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
-            },
-            help="Označi kolone i dodijeli redoslijed (1..N).",
-        )
-    except TypeError:
-        # Minimal editor (works across versions)
-        st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
-        cfg = st.data_editor(cfg_default, **_editor_kwargs)
+matched_out = _apply_selection(matched_en)
+unmatched_out = _apply_selection(unmatched_en)
 
-    # Compute ordered column list safely
-    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
-    cfg = cfg.dropna(subset=["order"])
-    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
-    export_cols = cfg["column"].tolist()
+with st.expander("Preview (custom): Matched", expanded=False):
+    st.dataframe(matched_out.head(200), use_container_width=True)
 
-    # Fallback: if nothing selected, keep default order
-    if not export_cols:
-        export_cols = default_order
+with st.expander("Preview (custom): Unmatched", expanded=False):
+    st.dataframe(unmatched_out.head(200), use_container_width=True)
 
-    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-        cols_in_df = [c for c in export_cols if c in df.columns]
-        return df[cols_in_df] if cols_in_df else df
-
-    matched_out = _apply_selection(matched_en)
-    unmatched_out = _apply_selection(unmatched_en)
-
-    with st.expander("Preview (custom): Matched", expanded=False):
-        st.dataframe(matched_out.head(200), use_container_width=True)
-    with st.expander("Preview (custom): Unmatched", expanded=False):
-        st.dataframe(unmatched_out.head(200), use_container_width=True)
-
-    st.download_button(
-        "⬇️ Download Excel (custom columns & order)",
-        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
-        file_name="mapping_custom.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_both_custom",
-    )
+st.download_button(
+    "⬇️ Download Excel (custom columns & order)",
+    data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+    file_name="mapping_custom.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="dl_both_custom",
+)
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
