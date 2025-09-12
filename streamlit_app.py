@@ -45,6 +45,18 @@ def _engine() -> Engine:
 engine = _engine()
 
 
+# Optional mapping of vendor_id to human-readable names
+VENDOR_NAMES: Dict[str, str] = st.secrets.get("vendor_names", {})
+
+
+def _vendor_label(v_id: str) -> str:
+    """Format vendor option with its friendly name if available."""
+    if v_id == "":
+        return "GLOBAL (blank)"
+    name = VENDOR_NAMES.get(v_id)
+    return f"{name} ({v_id})" if name else v_id
+
+
 def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
     with engine.connect() as conn:
         return pd.read_sql(text(query), conn, params=params or {})
@@ -126,7 +138,7 @@ vendor = st.selectbox(
     " ", options=vendors,
     index=vendors.index(prev_vendor) if prev_vendor in vendors else 0,
     key="vendor_select",
-    format_func=lambda v: "GLOBAL (blank)" if v == "" else v,
+    format_func=_vendor_label,
     label_visibility="collapsed",
 )
 st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
