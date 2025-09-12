@@ -43,7 +43,7 @@ def ensure_schema(engine: Engine) -> tuple[str, str, Optional[str]]:
             vendor_id   TEXT NOT NULL
         )
         """))
-        # Unique (vendor_id, supplier_id) — idempotent via DO block
+        # Unique (vendor_id, supplier_id)
         conn.execute(text("""
         DO $$
         BEGIN
@@ -78,6 +78,17 @@ def df_map(df: pd.DataFrame, func):
 # =============================================================================
 # PDF table extraction helpers
 # =============================================================================
+def _score_header(cols: list[str]) -> int:
+    tokens = [
+        "supplier", "supplier_id", "supplier code", "suppliercode",
+        "ean", "sku", "article", "code", "šifra", "sifra", "catalog", "catalogue"
+    ]
+    s = 0
+    for c in cols:
+        cl = str(c or "").lower()
+        s += sum(tok in cl for tok in tokens)
+    return s
+
 def extract_pdf_tables(file):
     """
     Return {"scanned": bool, "tables": list[{page:int, strategy:str, rows:list[list[str]]}]}
@@ -151,20 +162,6 @@ def load_crosswalk() -> pd.DataFrame:
     return df
 
 # =============================================================================
-# Vendor names loader (from vendors table)
-# =============================================================================
-@st.cache_data(show_spinner=False)
-def load_vendor_names() -> dict[str, str]:
-    """Return {vendor_id -> vendor_name}. If table missing, just return {}."""
-    try:
-        df = df_read_sql("SELECT vendor_id, vendor_name FROM vendors")
-    except Exception:
-        return {}
-    df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
-    df["vendor_name"] = df["vendor_name"].astype(str).str.strip()
-    return dict(zip(df["vendor_id"], df["vendor_name"]))
-
-# =============================================================================
 # UI: Help + cache button
 # =============================================================================
 with st.expander("How to use", expanded=True):
@@ -180,36 +177,21 @@ if st.button("♻️ Clear cache & re-run"):
     st.rerun()
 
 # =============================================================================
-# Load crosswalk + vendor names
+# Load crosswalk
 # =============================================================================
 cw = load_crosswalk()
-vendors_map = load_vendor_names()
 st.success(
     f"Crosswalk loaded | rows: {len(cw):,} | "
     f"vendors: {cw['vendor_id'].nunique() if 'vendor_id' in cw.columns else 'N/A'}"
 )
 
 # =============================================================================
-# Vendor selector (with names)
+# Vendor selector
 # =============================================================================
 vendor = "ALL"
 if "vendor_id" in cw.columns:
-    vendor_ids = sorted(cw["vendor_id"].dropna().unique().tolist())
-    options = ["ALL"] + vendor_ids
-
-    def fmt(v: str) -> str:
-        if v == "ALL":
-            return "ALL (no vendor filter)"
-        name = vendors_map.get(v)
-        return f"{v} — {name}" if name else v
-
-    vendor = st.selectbox(
-        "Vendor",
-        options,
-        index=0,
-        format_func=fmt,
-        help="Pick a vendor; GLOBAL = blank vendor"
-    )
+    vendors = ["ALL"] + sorted(cw["vendor_id"].dropna().unique().tolist())
+    vendor = st.selectbox("Vendor", vendors, index=0, help="Select a specific vendor (or GLOBAL) for vendor-specific mappings.")
 else:
     st.caption("No vendor_id in crosswalk → using ALL.")
 cw_for_vendor = cw if vendor == "ALL" or "vendor_id" not in cw.columns else cw[cw["vendor_id"] == vendor]
@@ -358,10 +340,9 @@ else:
 # Admin helpers (upsert/queue)
 # =============================================================================
 def upsert_mapping(vendor_id: str | None, supplier_id: str, tow_code: str) -> None:
-    # normalize (use .upper() on Python strings)
-    supplier_id = str(supplier_id or "").strip().upper()
-    tow_code    = str(tow_code or "").strip()
-    vendor_id   = str(vendor_id or "GLOBAL").strip().upper()  # GLOBAL sentinel for blank vendor
+    supplier_id = str(supplier_id or "").strip().str.upper() if hasattr(supplier_id, "strip") else str(supplier_id).strip().upper()
+    tow_code = str(tow_code or "").strip()
+    vendor_id = (str(vendor_id or "GLOBAL").strip().upper())  # GLOBAL sentinel for blank vendor
 
     sql = """
     INSERT INTO crosswalk (tow_code, supplier_id, vendor_id)
@@ -396,7 +377,7 @@ def apply_pending(file_path: str = "updates.csv") -> int:
 # =============================================================================
 # Admin (PIN-gated) + Live search
 # =============================================================================
-with st.expander("🔐 Admin • Add / Queue • Apply • Live search", expanded=False):
+with st.expander("🔐 Admin • Add / Queue / Apply Mappings • Live search", expanded=False):
     default_pin = os.environ.get("ST_ADMIN_PIN") or st.secrets.get("admin_pin", "letmein")
     col_pin, col_btn = st.columns([3,1])
     with col_pin:
@@ -465,33 +446,19 @@ with st.expander("🔐 Admin • Add / Queue • Apply • Live search", expande
         with c3:
             exact = st.checkbox("Exact supplier match", value=True)
 
-        # Build WHERE on aliased columns
         clauses, params = [], {}
         if vendor_q.strip():
-            clauses.append("c.vendor_id = :ven")
+            clauses.append("vendor_id = :ven")
             params["ven"] = vendor_q.strip().upper()
         if supplier_q.strip():
             if exact:
-                clauses.append("c.supplier_id = :sup")
+                clauses.append("supplier_id = :sup")
                 params["sup"] = supplier_q.strip().upper()
             else:
-                clauses.append("c.supplier_id LIKE :sup")
+                clauses.append("supplier_id LIKE :sup")
                 params["sup"] = f"%{supplier_q.strip().upper()}%"
-
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-
-        q = f"""
-        SELECT
-          c.vendor_id,
-          v.vendor_name,
-          c.supplier_id,
-          c.tow_code
-        FROM crosswalk c
-        LEFT JOIN vendors v ON v.vendor_id = c.vendor_id
-        {where}
-        ORDER BY c.vendor_id, c.supplier_id
-        LIMIT 500
-        """
+        q = f"SELECT vendor_id, supplier_id, tow_code FROM crosswalk{where} ORDER BY vendor_id, supplier_id LIMIT 500"
         df_res = df_read_sql(q, params)
         st.caption(f"{len(df_res)} result(s) shown (max 500)")
         st.dataframe(df_res, use_container_width=True, height=260)
