@@ -209,10 +209,10 @@ with c1:
         for k in ["matched", "unmatched", "matched_cols", "unmatched_cols", "mapped_ready", "map_locked"]:
             st.session_state.pop(k, None)
 with c2:
-    st.session_state["map_locked"] = st.checkbox(
+    st.checkbox(
         "Lock mapping result (prevent reruns from clearing)",
         value=st.session_state.get("map_locked", True),
-        key="chk_lock",
+        key="map_locked",
     )
 
 if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
