@@ -86,6 +86,18 @@ def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
     return vals
 
 
+@st.cache_data(show_spinner=False)
+def _load_vendor_names() -> Dict[str, str]:
+    """Return {vendor_id -> vendor_name} from vendors table (if exists)."""
+    try:
+        df = _read_sql("SELECT vendor_id, vendor_name FROM vendors")
+    except Exception:
+        return {}
+    df["vendor_id"] = df["vendor_id"].astype(str).strip().str.upper()
+    df["vendor_name"] = df["vendor_name"].astype(str).fillna("").str.strip()
+    return dict(zip(df["vendor_id"], df["vendor_name"]))
+
+
 # =============================================================================
 # Header
 # =============================================================================
@@ -107,8 +119,10 @@ except Exception as e:
 
 
 # =============================================================================
-# Vendor select: filter + refresh (dinamički iz baze)
+# Vendor select: filter + refresh (dinamički iz baze) (+ vendor names)
 # =============================================================================
+vendors_map = _load_vendor_names()
+
 st.markdown("**Vendor**")
 cc1, cc2 = st.columns([3, 1])
 with cc1:
@@ -122,11 +136,17 @@ prev_vendor = st.session_state.get("vendor_select", "")
 if prev_vendor not in vendors:
     prev_vendor = ""  # GLOBAL
 
+def _fmt_vendor(v: str) -> str:
+    if v == "":
+        return "GLOBAL (blank)"
+    name = vendors_map.get(v.upper())
+    return f"{v} — {name}" if name else v
+
 vendor = st.selectbox(
     " ", options=vendors,
     index=vendors.index(prev_vendor) if prev_vendor in vendors else 0,
     key="vendor_select",
-    format_func=lambda v: "GLOBAL (blank)" if v == "" else v,
+    format_func=_fmt_vendor,
     label_visibility="collapsed",
 )
 st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
@@ -247,7 +267,9 @@ if st.session_state.get("mapped_ready", False):
     with st.expander("Preview: Unmatched (first 200 rows)", expanded=False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
-    # Old/simple export
+    # -----------------------------------------------------------------------------
+    # 2a) OLD / SIMPLE EXPORT (unchanged)
+    # -----------------------------------------------------------------------------
     st.download_button(
         "Download Excel (Matched + Unmatched)",
         data=_excel_bytes({"Matched": matched, "Unmatched": unmatched}),
@@ -256,61 +278,97 @@ if st.session_state.get("mapped_ready", False):
         key="dl_simple_both",
     )
 
-    # Custom export
-    st.subheader("3) Custom Excel export")
-    tabs = st.tabs(["Matched", "Unmatched", "Both (custom)"])
+    # -----------------------------------------------------------------------------
+    # 2b) NEW: Add extra columns (Invoice, Item, vendor_id, optional date)
+    #      + Choose columns & custom ORDER UI
+    # -----------------------------------------------------------------------------
+    st.subheader("3) Custom export (add columns + choose order)")
 
-    with tabs[0]:
-        all_cols_m = st.session_state["matched_cols"]
-        cols_m = st.multiselect(
-            "Columns to export (Matched)",
-            options=all_cols_m,
-            default=st.session_state.get("sel_cols_matched", all_cols_m),
-            key="sel_cols_matched",
-        )
-        dfm = matched[cols_m] if cols_m else matched
-        st.dataframe(dfm.head(30), use_container_width=True, height=240)
-        st.download_button(
-            "⬇️ Download Matched (custom columns)",
-            data=_excel_bytes({"Matched": dfm}),
-            file_name="matched_custom.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_matched_custom",
-        )
+    # Defaults
+    invoice_label = "Invoice"
+    item_label = "Item"
+    vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
+    all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
+    date_choice = "(none)"
 
-    with tabs[1]:
-        all_cols_u = st.session_state["unmatched_cols"]
-        cols_u = st.multiselect(
-            "Columns to export (Unmatched)",
-            options=all_cols_u,
-            default=st.session_state.get("sel_cols_unmatched", all_cols_u),
-            key="sel_cols_unmatched",
-        )
-        dfu = unmatched[cols_u] if cols_u else unmatched
-        st.dataframe(dfu.head(30), use_container_width=True, height=240)
-        st.download_button(
-            "⬇️ Download Unmatched (custom columns)",
-            data=_excel_bytes({"Unmatched": dfu}),
-            file_name="unmatched_custom.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_unmatched_custom",
-        )
+    with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, date)", expanded=True):
+        cA, cB, cC = st.columns([1, 1, 1.3])
+        with cA:
+            invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
+        with cB:
+            item_label = st.text_input("Constant value for 'Item'", value="Item")
+        with cC:
+            vendor_to_stamp = st.text_input(
+                "vendor_id to stamp on export",
+                value=(vendor if vendor != "" else "GLOBAL")
+            ).strip().upper() or "GLOBAL"
 
-    with tabs[2]:
-        cols_m_both = st.session_state.get("sel_cols_matched", all_cols_m)
-        cols_u_both = st.session_state.get("sel_cols_unmatched", all_cols_u)
-        data_dict: Dict[str, pd.DataFrame] = {}
-        if not matched.empty:
-            data_dict["Matched"] = matched[cols_m_both] if cols_m_both else matched
-        if not unmatched.empty:
-            data_dict["Unmatched"] = unmatched[cols_u_both] if cols_u_both else unmatched
-        st.download_button(
-            "⬇️ Download Both (custom columns & order)",
-            data=_excel_bytes(data_dict),
-            file_name="mapping_custom.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_both_custom",
-        )
+        date_options = ["(none)"] + all_cols_now
+        date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
+
+    def _enrich(df: pd.DataFrame) -> pd.DataFrame:
+        df2 = df.copy()
+        df2["Invoice"] = invoice_label
+        df2["Item"] = item_label
+        df2["vendor_id"] = vendor_to_stamp
+        if date_choice != "(none)" and date_choice in df2.columns:
+            df2["date"] = df2[date_choice]
+        return df2
+
+    matched_en = _enrich(matched)
+    unmatched_en = _enrich(unmatched)
+
+    # Column selection + ORDER editor
+    all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
+    preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
+    rest = [c for c in all_cols if c not in preferred_first]
+    default_order = preferred_first + rest
+
+    cfg_default = pd.DataFrame({
+        "column": default_order,
+        "include": True,
+        "order": list(range(1, len(default_order) + 1)),
+    })
+
+    st.markdown("### Choose export columns & order")
+    cfg = st.data_editor(
+        cfg_default,
+        key="export_cfg",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "column": st.column_config.TextColumn("Column", disabled=True),
+            "include": st.column_config.CheckboxColumn("Include"),
+            "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
+        },
+        help="Označi kolone i dodijeli redoslijed (1..N)."
+    )
+
+    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
+    cfg = cfg.dropna(subset=["order"])
+    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
+    export_cols = cfg["column"].tolist()
+
+    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+        cols_in_df = [c for c in export_cols if c in df.columns]
+        return df[cols_in_df] if cols_in_df else df
+
+    matched_out = _apply_selection(matched_en)
+    unmatched_out = _apply_selection(unmatched_en)
+
+    with st.expander("Preview (custom): Matched", expanded=False):
+        st.dataframe(matched_out.head(200), use_container_width=True)
+    with st.expander("Preview (custom): Unmatched", expanded=False):
+        st.dataframe(unmatched_out.head(200), use_container_width=True)
+
+    st.download_button(
+        "⬇️ Download Excel (custom columns & order)",
+        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+        file_name="mapping_custom.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_both_custom",
+    )
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
@@ -450,22 +508,23 @@ st.session_state["ls_exact"] = exact
 
 clauses, params = [], {}
 if vendor_filter_live != "":
-    clauses.append("vendor_id = :v1")
+    clauses.append("c.vendor_id = :v1")
     params["v1"] = vendor_filter_live
 if supp_filter_live != "":
     if exact:
-        clauses.append("supplier_id = :s1")
+        clauses.append("c.supplier_id = :s1")
         params["s1"] = supp_filter_live
     else:
-        clauses.append("supplier_id ILIKE :s1")
+        clauses.append("c.supplier_id ILIKE :s1")
         params["s1"] = f"%{supp_filter_live}%"
 
 where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 q = f"""
-    SELECT vendor_id, supplier_id, tow_code
-    FROM crosswalk
+    SELECT c.vendor_id, v.vendor_name, c.supplier_id, c.tow_code
+    FROM crosswalk c
+    LEFT JOIN vendors v ON v.vendor_id = c.vendor_id
     {where}
-    ORDER BY vendor_id, supplier_id
+    ORDER BY c.vendor_id, c.supplier_id
     LIMIT 500
 """
 
