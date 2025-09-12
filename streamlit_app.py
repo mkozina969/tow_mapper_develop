@@ -226,19 +226,28 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
     if st.button("Run mapping", type="primary", key="btn_run_mapping"):
         try:
             df_sup = preview_df.rename(columns={supplier_col: "supplier_id"}).copy()
-            df_sup["supplier_id"] = df_sup["supplier_id"].astype(str).str.strip()
+            df_sup["supplier_id"] = (
+                df_sup["supplier_id"].astype(str).str.strip().str.upper()
+            )
             vparam = (vendor or "").strip()
 
-            df_map = _read_sql("""
+            df_map = _read_sql(
+                """
                 SELECT vendor_id, supplier_id, tow_code
                 FROM crosswalk
                 WHERE vendor_id = :v OR vendor_id = ''
-            """, {"v": vparam})
+            """,
+                {"v": vparam},
+            )
+            df_map["supplier_id"] = df_map["supplier_id"].astype(str).str.strip().str.upper()
 
-            lookup = {(r["vendor_id"], r["supplier_id"]): r["tow_code"] for _, r in df_map.iterrows()}
+            lookup = {
+                (r["vendor_id"], r["supplier_id"]): r["tow_code"]
+                for _, r in df_map.iterrows()
+            }
 
             def resolve_tow(supp_code: str) -> Optional[str]:
-                s = str(supp_code)
+                s = str(supp_code).strip().upper()
                 return lookup.get((vparam, s)) or lookup.get(("", s)) or None
 
             df_out = df_sup.copy()
