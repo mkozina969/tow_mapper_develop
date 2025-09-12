@@ -93,10 +93,9 @@ def _load_vendor_names() -> Dict[str, str]:
         df = _read_sql("SELECT vendor_id, vendor_name FROM vendors")
     except Exception:
         return {}
-    df["vendor_id"] = df["vendor_id"].astype(str).strip().str.upper()
+    df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
     df["vendor_name"] = df["vendor_name"].astype(str).fillna("").str.strip()
     return dict(zip(df["vendor_id"], df["vendor_name"]))
-
 
 # =============================================================================
 # Header
