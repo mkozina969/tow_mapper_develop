@@ -129,7 +129,7 @@ with cc1:
     vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
 with cc2:
     if st.button("Refresh list", key="btn_refresh_vendors"):
-        st.cache_data.clear()
+        _fetch_vendors.clear()
 
 vendors = _fetch_vendors(vendor_filter)
 prev_vendor = st.session_state.get("vendor_select", "")
