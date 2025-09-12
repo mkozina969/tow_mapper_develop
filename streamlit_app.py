@@ -572,3 +572,4 @@ try:
                 st.success("Prefilled — skrolaj gore do 'Add a single mapping'.")
 except Exception as e:
     st.error(f"Search failed: {e}")
+
