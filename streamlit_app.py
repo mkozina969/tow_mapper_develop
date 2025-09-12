@@ -119,43 +119,38 @@ except Exception as e:
 
 
 # =============================================================================
-# Vendor names loader (from vendors table)
+# Vendor select: filter + refresh (dinamički iz baze) (+ vendor names)
 # =============================================================================
-@st.cache_data(show_spinner=False)
-def load_vendor_names() -> dict[str, str]:
-    """Return {vendor_id -> vendor_name}. If table missing, just return {}."""
-    try:
-        df = df_read_sql("SELECT vendor_id, vendor_name FROM vendors")
-    except Exception:
-        return {}
-    df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
-    df["vendor_name"] = df["vendor_name"].astype(str).str.strip()
-    return dict(zip(df["vendor_id"], df["vendor_name"]))
+vendors_map = _load_vendor_names()
 
-# =============================================================================
-# Vendor selector (with names)
-# =============================================================================
-vendor = "ALL"
-if "vendor_id" in cw.columns:
-    vendor_ids = sorted(cw["vendor_id"].dropna().unique().tolist())
-    options = ["ALL"] + vendor_ids
+st.markdown("**Vendor**")
+cc1, cc2 = st.columns([3, 1])
+with cc1:
+    vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
+with cc2:
+    if st.button("Refresh list", key="btn_refresh_vendors"):
+        st.cache_data.clear()
 
-    def fmt(v: str) -> str:
-        if v == "ALL":
-            return "ALL (no vendor filter)"
-        name = vendors_map.get(v)
-        return f"{v} — {name}" if name else v
+vendors = _fetch_vendors(vendor_filter)
+prev_vendor = st.session_state.get("vendor_select", "")
+if prev_vendor not in vendors:
+    prev_vendor = ""  # GLOBAL
 
-    vendor = st.selectbox(
-        "Vendor",
-        options,
-        index=0,
-        format_func=fmt,
-        help="Pick a vendor; GLOBAL = blank vendor"
-    )
-else:
-    st.caption("No vendor_id in crosswalk → using ALL.")
-cw_for_vendor = cw if vendor == "ALL" or "vendor_id" not in cw.columns else cw[cw["vendor_id"] == vendor]
+def _fmt_vendor(v: str) -> str:
+    if v == "":
+        return "GLOBAL (blank)"
+    name = vendors_map.get(v.upper())
+    return f"{v} — {name}" if name else v
+
+vendor = st.selectbox(
+    " ", options=vendors,
+    index=vendors.index(prev_vendor) if prev_vendor in vendors else 0,
+    key="vendor_select",
+    format_func=_fmt_vendor,
+    label_visibility="collapsed",
+)
+st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
+
 
 # =============================================================================
 # Upload invoice
