@@ -311,9 +311,10 @@ if st.session_state.get("mapped_ready", False):
     vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
     all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
     date_choice = "(none)"
+    date_manual = ""
 
     with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, date)", expanded=True):
-        cA, cB, cC = st.columns([1, 1, 1.3])
+        cA, cB, cC, cD = st.columns([1, 1, 1.3, 1.3])
         with cA:
             invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
         with cB:
@@ -323,6 +324,8 @@ if st.session_state.get("mapped_ready", False):
                 "vendor_id to stamp on export",
                 value=(vendor if vendor != "" else "GLOBAL")
             ).strip().upper() or "GLOBAL"
+        with cD:
+            date_manual = st.text_input("Manual Date (YYYY-MM-DD)", value="")
 
         date_options = ["(none)"] + all_cols_now
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
@@ -332,7 +335,10 @@ if st.session_state.get("mapped_ready", False):
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
-        if date_choice != "(none)" and date_choice in df2.columns:
+        # Use manual date if provided, otherwise use selected column
+        if date_manual:
+            df2["date"] = date_manual
+        elif date_choice != "(none)" and date_choice in df2.columns:
             df2["date"] = df2[date_choice]
         return df2
 
@@ -345,7 +351,6 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # NO cached function context for export_cols!
     export_cols = _columns_editor(default_order)
     if not export_cols:
         export_cols = default_order
