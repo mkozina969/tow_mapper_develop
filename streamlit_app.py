@@ -149,14 +149,9 @@ except Exception as e:
 vendors_map = _load_vendor_names()
 
 st.markdown("**Vendor**")
-cc1, cc2 = st.columns([3, 1])
-with cc1:
-    vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
-with cc2:
-    if st.button("Refresh list", key="btn_refresh_vendors"):
-        st.cache_data.clear()
-
+vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
 vendors = _fetch_vendors(vendor_filter)
+
 prev_vendor = st.session_state.get("vendor_select", "")
 if prev_vendor not in vendors:
     prev_vendor = ""  # GLOBAL
@@ -302,19 +297,20 @@ if st.session_state.get("mapped_ready", False):
     )
 
     # -----------------------------------------------------------------------------
-    # 2b) Custom export (add Invoice/Item/vendor_id/date + choose columns & order)
+    # 2b) Custom export (add Invoice/Item/vendor_id/date/location + choose columns & order)
     # -----------------------------------------------------------------------------
     st.subheader("3) Custom export (add columns + choose order)")
 
     invoice_label = "Invoice"
     item_label = "Item"
     vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
+    location_text = "H00"
     all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
     date_choice = "(none)"
     date_manual = ""
 
-    with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, date)", expanded=True):
-        cA, cB, cC, cD = st.columns([1, 1, 1.3, 1.3])
+    with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, location, date)", expanded=True):
+        cA, cB, cC, cD, cE = st.columns([1, 1, 1.2, 1.2, 1.2])
         with cA:
             invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
         with cB:
@@ -325,6 +321,8 @@ if st.session_state.get("mapped_ready", False):
                 value=(vendor if vendor != "" else "GLOBAL")
             ).strip().upper() or "GLOBAL"
         with cD:
+            location_text = st.text_input("Constant value for 'Location'", value="H00")
+        with cE:
             date_manual = st.text_input("Manual Date (YYYY-MM-DD)", value="")
 
         date_options = ["(none)"] + all_cols_now
@@ -335,6 +333,7 @@ if st.session_state.get("mapped_ready", False):
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
+        df2["Location"] = location_text
         # Use manual date if provided, otherwise use selected column
         if date_manual:
             df2["date"] = date_manual
@@ -347,7 +346,7 @@ if st.session_state.get("mapped_ready", False):
 
     # Build preferred order
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
-    preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
+    preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
