@@ -141,7 +141,8 @@ def _columns_editor(default_order: List[str]) -> List[str]:
     cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
     cfg_valid = cfg.dropna(subset=["order"])
     cfg_sorted = cfg_valid.sort_values(["order", "column"], kind="stable")
-    export_cols = cfg_sorted[cfg_sorted["include"]]["column"].tolist()
+    # Only filter for export columns, NOT for the editor
+    export_cols = [col for col, inc in zip(cfg_sorted["column"], cfg_sorted["include"]) if inc]
     return export_cols
 
 # =============================================================================
