@@ -21,7 +21,6 @@ from sqlalchemy.engine import Engine
 
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -94,10 +93,12 @@ def _load_vendor_names() -> Dict[str, str]:
     except Exception:
         return {}
     df["vendor_id"] = df["vendor_id"].astype(str).str.strip().str.upper()
-    df["vendor_name"] = df["vendor_name"].astype(str).fillna("").str.strip()
+    df["vendor_name"] = df["vendor_name"].fillna("").astype(str).str.strip()
     return dict(zip(df["vendor_id"], df["vendor_name"]))
+
+
 @st.cache_data(show_spinner=False)
-def _columns_editor(default_order: list[str]) -> list[str]:
+def _columns_editor(default_order: List[str]) -> List[str]:
     """
     Show a robust column chooser that works across Streamlit versions.
     Returns the ordered list of columns to export.
@@ -124,7 +125,6 @@ def _columns_editor(default_order: list[str]) -> list[str]:
             help="Označi kolone i dodijeli redoslijed (1..N).",
         )
     except TypeError:
-        # Fallback for environments where column_config signature differs
         st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
         cfg = st.data_editor(cfg_default, **_editor_kwargs)
 
@@ -153,9 +153,8 @@ try:
 except Exception as e:
     st.warning(f"Ne mogu pročitati broj redaka crosswalka: {e}")
 
-
 # =============================================================================
-# Vendor select: filter + refresh (dinamički iz baze) (+ vendor names)
+# Vendor select: filter + refresh (+ vendor names)
 # =============================================================================
 vendors_map = _load_vendor_names()
 
@@ -165,7 +164,7 @@ with cc1:
     vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
 with cc2:
     if st.button("Refresh list", key="btn_refresh_vendors"):
-        _fetch_vendors.clear()
+        st.cache_data.clear()
 
 vendors = _fetch_vendors(vendor_filter)
 prev_vendor = st.session_state.get("vendor_select", "")
@@ -186,7 +185,6 @@ vendor = st.selectbox(
     label_visibility="collapsed",
 )
 st.caption("Ostavi prazno za GLOBAL mapiranja (vrijedi za sve vendore).")
-
 
 # =============================================================================
 # Upload invoice
@@ -233,9 +231,8 @@ if uploaded is not None:
         st.error(f"Greška pri čitanju datoteke: {e}")
         preview_df = None
 
-
 # =============================================================================
-# 2) Map to TOW (rezultat perzistira i može se zaključati)
+# 2) Map to TOW
 # =============================================================================
 st.subheader("2) Map to TOW")
 
@@ -245,10 +242,10 @@ with c1:
         for k in ["matched", "unmatched", "matched_cols", "unmatched_cols", "mapped_ready", "map_locked"]:
             st.session_state.pop(k, None)
 with c2:
-    st.checkbox(
+    st.session_state["map_locked"] = st.checkbox(
         "Lock mapping result (prevent reruns from clearing)",
         value=st.session_state.get("map_locked", True),
-        key="map_locked",
+        key="chk_lock",
     )
 
 if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
@@ -262,28 +259,19 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
     if st.button("Run mapping", type="primary", key="btn_run_mapping"):
         try:
             df_sup = preview_df.rename(columns={supplier_col: "supplier_id"}).copy()
-            df_sup["supplier_id"] = (
-                df_sup["supplier_id"].astype(str).str.strip().str.upper()
-            )
+            df_sup["supplier_id"] = df_sup["supplier_id"].astype(str).str.strip()
             vparam = (vendor or "").strip()
 
-            df_map = _read_sql(
-                """
+            df_map = _read_sql("""
                 SELECT vendor_id, supplier_id, tow_code
                 FROM crosswalk
                 WHERE vendor_id = :v OR vendor_id = ''
-            """,
-                {"v": vparam},
-            )
-            df_map["supplier_id"] = df_map["supplier_id"].astype(str).str.strip().str.upper()
+            """, {"v": vparam})
 
-            lookup = {
-                (r["vendor_id"], r["supplier_id"]): r["tow_code"]
-                for _, r in df_map.iterrows()
-            }
+            lookup = {(r["vendor_id"], r["supplier_id"]): r["tow_code"] for _, r in df_map.iterrows()}
 
             def resolve_tow(supp_code: str) -> Optional[str]:
-                s = str(supp_code).strip().upper()
+                s = str(supp_code)
                 return lookup.get((vparam, s)) or lookup.get(("", s)) or None
 
             df_out = df_sup.copy()
@@ -313,7 +301,7 @@ if st.session_state.get("mapped_ready", False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
     # -----------------------------------------------------------------------------
-    # 2a) OLD / SIMPLE EXPORT (unchanged)
+    # 2a) OLD / SIMPLE EXPORT
     # -----------------------------------------------------------------------------
     st.download_button(
         "Download Excel (Matched + Unmatched)",
@@ -324,12 +312,10 @@ if st.session_state.get("mapped_ready", False):
     )
 
     # -----------------------------------------------------------------------------
-    # 2b) NEW: Add extra columns (Invoice, Item, vendor_id, optional date)
-    #      + Choose columns & custom ORDER UI
+    # 2b) Custom export (add Invoice/Item/vendor_id/date + choose columns & order)
     # -----------------------------------------------------------------------------
     st.subheader("3) Custom export (add columns + choose order)")
 
-    # Defaults
     invoice_label = "Invoice"
     item_label = "Item"
     vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
@@ -363,47 +349,39 @@ if st.session_state.get("mapped_ready", False):
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
-    # Column selection + ORDER editor
+    # Build preferred order
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Column selection + ORDER editor (robust)
-    # Build preferred order
-all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
-preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
-rest = [c for c in all_cols if c not in preferred_first]
-default_order = preferred_first + rest
+    # Get ordered column selection
+    export_cols = _columns_editor(default_order)
+    if not export_cols:
+        export_cols = default_order
 
-# Get ordered column selection from the helper
-export_cols = _columns_editor(default_order)
-if not export_cols:
-    export_cols = default_order
+    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+        cols_in_df = [c for c in export_cols if c in df.columns]
+        return df[cols_in_df] if cols_in_df else df
 
-def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-    cols_in_df = [c for c in export_cols if c in df.columns]
-    return df[cols_in_df] if cols_in_df else df
+    matched_out = _apply_selection(matched_en)
+    unmatched_out = _apply_selection(unmatched_en)
 
-matched_out = _apply_selection(matched_en)
-unmatched_out = _apply_selection(unmatched_en)
+    with st.expander("Preview (custom): Matched", expanded=False):
+        st.dataframe(matched_out.head(200), use_container_width=True)
 
-with st.expander("Preview (custom): Matched", expanded=False):
-    st.dataframe(matched_out.head(200), use_container_width=True)
+    with st.expander("Preview (custom): Unmatched", expanded=False):
+        st.dataframe(unmatched_out.head(200), use_container_width=True)
 
-with st.expander("Preview (custom): Unmatched", expanded=False):
-    st.dataframe(unmatched_out.head(200), use_container_width=True)
-
-st.download_button(
-    "⬇️ Download Excel (custom columns & order)",
-    data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
-    file_name="mapping_custom.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    key="dl_both_custom",
-)
+    st.download_button(
+        "⬇️ Download Excel (custom columns & order)",
+        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+        file_name="mapping_custom.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_both_custom",
+    )
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
-
 
 # =============================================================================
 # Admin (PIN -> unlock) + Queue/Direct + Live search (NEON DB)
@@ -579,4 +557,3 @@ try:
                 st.success("Prefilled — skrolaj gore do 'Add a single mapping'.")
 except Exception as e:
     st.error(f"Search failed: {e}")
-
