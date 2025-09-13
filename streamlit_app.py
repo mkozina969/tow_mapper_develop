@@ -344,13 +344,18 @@ if st.session_state.get("mapped_ready", False):
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
+    # --- Ensure Location column is always present ---
+    if "Location" not in matched_en.columns:
+        matched_en["Location"] = location_text
+    if "Location" not in unmatched_en.columns:
+        unmatched_en["Location"] = location_text
+
     # Build preferred order
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # ==== COLUMN EDITOR (order & selection) ====
     export_cols = _columns_editor(default_order)
     if not export_cols:
         export_cols = default_order
