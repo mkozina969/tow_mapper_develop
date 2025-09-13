@@ -92,58 +92,42 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
 # Multiselect Columns Editor (NO CACHE DECORATORS ALLOWED)
 # =============================================================================
 def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
+    """
+    Stable column picker that avoids 'first click disappears' by batching changes via a form.
+    - preferred_order: full list of columns in desired default order
+    Returns: List[str] of final chosen columns (from st.session_state["export_cols"])
+    """
     st.markdown("### Choose export columns & order")
 
-    # State
+    # Initialize once
     if "export_cols" not in st.session_state:
-        st.session_state["export_cols"] = preferred_order
+        st.session_state["export_cols"] = list(preferred_order)
 
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("Select All"):
-            st.session_state["export_cols"] = preferred_order
-        if st.button("Deselect All"):
-            st.session_state["export_cols"] = []
+    # Form to batch UI changes
+    with st.form("export_cols_form"):
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            if st.form_submit_button("Select All", use_container_width=True):
+                st.session_state["export_cols"] = list(preferred_order)
+        with col2:
+            pass  # spacer for layout
 
-    selected = st.multiselect(
-        "Export columns (drag to reorder):",
-        options=preferred_order,
-        default=st.session_state["export_cols"],
-        key="multiselect_export_cols",
-        help="Select and drag columns to set order."
-    )
-    st.session_state["export_cols"] = selected
-    return selected
+        # Use a separate UI key so defaults don't fight session state during reruns
+        selected = st.multiselect(
+            "Export columns (drag to reorder):",
+            options=list(preferred_order),
+            default=st.session_state["export_cols"],
+            key="multiselect_export_cols_ui",
+            help="Select and drag columns to set order."
+        )
 
-# =============================================================================
-# Main Script Starts Here (NO CACHING)
-# =============================================================================
+        applied = st.form_submit_button("Apply", use_container_width=False)
 
-st.title("Supplier → TOW Mapper (Cloud DB)")
-with st.expander("How to use", expanded=False):
-    st.markdown("""
-1) Učitaj račun (Excel/CSV/PDF).  
-2) Odaberi kolonu sa **supplier code** i pokreni mapping.  
-3) Export: klasični (Matched+Unmatched) ili **Custom** (odabir kolona i redoslijeda).  
-4) Admin (PIN): upsert, queue, apply i live search.
-""")
+    # Only update the canonical selection after Submit
+    if applied:
+        st.session_state["export_cols"] = list(selected)
 
-st.toggle("Debug logs", key="_debug", value=False)
-
-try:
-    st.success(f"Crosswalk loaded (rows: {_crosswalk_count():,}) ✅")
-except Exception as e:
-    st.warning(f"Ne mogu pročitati broj redaka crosswalka: {e}")
-
-vendors_map = _load_vendor_names()
-
-st.markdown("**Vendor**")
-vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
-vendors = _fetch_vendors(vendor_filter)
-
-prev_vendor = st.session_state.get("vendor_select", "")
-if prev_vendor not in vendors:
-    prev_vendor = ""  # GLOBAL
+    return st.session_state["export_cols"]
 
 def _fmt_vendor(v: str) -> str:
     if v == "":
