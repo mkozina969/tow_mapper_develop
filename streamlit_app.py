@@ -89,61 +89,31 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Widgets (NO CACHE DECORATORS ALLOWED)
+# Multiselect Columns Editor (NO CACHE DECORATORS ALLOWED)
 # =============================================================================
-def _columns_editor(default_order: List[str]) -> List[str]:
-    """
-    Widget: Choose export columns and order. NO @st.cache_data here!
-    """
-    # State for select/deselect all
-    if "col_select_state" not in st.session_state:
-        st.session_state["col_select_state"] = {col: True for col in default_order}
-
+def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
     st.markdown("### Choose export columns & order")
+
+    # State
+    if "export_cols" not in st.session_state:
+        st.session_state["export_cols"] = preferred_order
 
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("Select All"):
-            for col in default_order:
-                st.session_state["col_select_state"][col] = True
+            st.session_state["export_cols"] = preferred_order
         if st.button("Deselect All"):
-            for col in default_order:
-                st.session_state["col_select_state"][col] = False
+            st.session_state["export_cols"] = []
 
-    cfg_default = pd.DataFrame({
-        "column": default_order,
-        "include": [st.session_state["col_select_state"].get(col, True) for col in default_order],
-        "order": list(range(1, len(default_order) + 1)),
-    })
-
-    _editor_kwargs = dict(hide_index=True, use_container_width=True)
-
-    try:
-        cfg = st.data_editor(
-            cfg_default,
-            key="export_editor",
-            **_editor_kwargs,
-            column_config={
-                "column": st.column_config.TextColumn("Column", disabled=True),
-                "include": st.column_config.CheckboxColumn("Include"),
-                "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
-            },
-            help="Označi kolone i dodijeli redoslijed (1..N).",
-        )
-    except TypeError:
-        st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
-        cfg = st.data_editor(cfg_default, key="export_editor_basic", **_editor_kwargs)
-
-    # Always keep ALL rows in the editor, update session state from user actions
-    for col, included in zip(cfg["column"], cfg["include"]):
-        st.session_state["col_select_state"][col] = included
-
-    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
-    cfg_valid = cfg.dropna(subset=["order"])
-    cfg_sorted = cfg_valid.sort_values(["order", "column"], kind="stable")
-    # Only filter for export, NOT for the editor
-    export_cols = [col for col, inc in zip(cfg_sorted["column"], cfg_sorted["include"]) if inc]
-    return export_cols
+    selected = st.multiselect(
+        "Export columns (drag to reorder):",
+        options=preferred_order,
+        default=st.session_state["export_cols"],
+        key="multiselect_export_cols",
+        help="Select and drag columns to set order."
+    )
+    st.session_state["export_cols"] = selected
+    return selected
 
 # =============================================================================
 # Main Script Starts Here (NO CACHING)
@@ -375,7 +345,7 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    export_cols = _columns_editor(default_order)
+    export_cols = columns_multiselect_editor(default_order)
     if not export_cols:
         export_cols = default_order
 
