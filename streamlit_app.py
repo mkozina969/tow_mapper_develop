@@ -351,6 +351,7 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
+    # ==== COLUMN EDITOR (order & selection) ====
     export_cols = _columns_editor(default_order)
     if not export_cols:
         export_cols = default_order
