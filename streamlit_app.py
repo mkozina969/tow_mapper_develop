@@ -139,9 +139,9 @@ def _columns_editor(default_order: List[str]) -> List[str]:
         st.session_state["col_select_state"][col] = included
 
     cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
-    cfg = cfg.dropna(subset=["order"])
-    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
-    export_cols = cfg["column"].tolist()
+    cfg_valid = cfg.dropna(subset=["order"])
+    cfg_sorted = cfg_valid.sort_values(["order", "column"], kind="stable")
+    export_cols = cfg_sorted[cfg_sorted["include"]]["column"].tolist()
     return export_cols
 
 # =============================================================================
