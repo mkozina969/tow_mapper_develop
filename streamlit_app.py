@@ -95,13 +95,27 @@ def _columns_editor(default_order: List[str]) -> List[str]:
     """
     Widget: Choose export columns and order. NO @st.cache_data here!
     """
+    # State for select/deselect all
+    if "col_select_state" not in st.session_state:
+        st.session_state["col_select_state"] = {col: True for col in default_order}
+
+    st.markdown("### Choose export columns & order")
+
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("Select All"):
+            for col in default_order:
+                st.session_state["col_select_state"][col] = True
+        if st.button("Deselect All"):
+            for col in default_order:
+                st.session_state["col_select_state"][col] = False
+
     cfg_default = pd.DataFrame({
         "column": default_order,
-        "include": True,
+        "include": [st.session_state["col_select_state"].get(col, True) for col in default_order],
         "order": list(range(1, len(default_order) + 1)),
     })
 
-    st.markdown("### Choose export columns & order")
     _editor_kwargs = dict(hide_index=True, use_container_width=True)
 
     try:
@@ -119,6 +133,10 @@ def _columns_editor(default_order: List[str]) -> List[str]:
     except TypeError:
         st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
         cfg = st.data_editor(cfg_default, key="export_editor_basic", **_editor_kwargs)
+
+    # Update state after user toggles individual checkboxes
+    for col, included in zip(cfg["column"], cfg["include"]):
+        st.session_state["col_select_state"][col] = included
 
     cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
     cfg = cfg.dropna(subset=["order"])
