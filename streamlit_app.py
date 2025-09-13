@@ -134,14 +134,14 @@ def _columns_editor(default_order: List[str]) -> List[str]:
         st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
         cfg = st.data_editor(cfg_default, key="export_editor_basic", **_editor_kwargs)
 
-    # Update state after user toggles individual checkboxes
+    # Always keep ALL rows in the editor, update session state from user actions
     for col, included in zip(cfg["column"], cfg["include"]):
         st.session_state["col_select_state"][col] = included
 
     cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
     cfg_valid = cfg.dropna(subset=["order"])
     cfg_sorted = cfg_valid.sort_values(["order", "column"], kind="stable")
-    # Only filter for export columns, NOT for the editor
+    # Only filter for export, NOT for the editor
     export_cols = [col for col, inc in zip(cfg_sorted["column"], cfg_sorted["include"]) if inc]
     return export_cols
 
