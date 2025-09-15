@@ -97,9 +97,14 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
 def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
     st.markdown("### Choose export columns & order (drag to reorder below)")
 
-    if "pending_export_cols" not in st.session_state:
+    # Ensure preferred_order is not empty
+    if not preferred_order:
+        st.warning("No columns available for export/reordering.")
+        return None
+
+    if "pending_export_cols" not in st.session_state or not st.session_state["pending_export_cols"]:
         st.session_state["pending_export_cols"] = preferred_order
-    if "export_cols" not in st.session_state:
+    if "export_cols" not in st.session_state or not st.session_state["export_cols"]:
         st.session_state["export_cols"] = preferred_order
     if "columns_applied" not in st.session_state:
         st.session_state["columns_applied"] = True
@@ -376,7 +381,7 @@ if st.session_state.get("mapped_ready", False):
         if "date" not in df.columns:
             df["date"] = date_manual if date_manual else ""
 
-    # Build preferred order (ALWAYS include 'date')
+    # Robustly build preferred order, ensure columns are not empty
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     if "date" not in all_cols:
         all_cols.append("date")
@@ -384,8 +389,12 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # ---- DRAG AND DROP COLUMN SELECTION ----
-    export_cols = columns_sortable_with_apply(default_order)
+    # Only call columns_sortable_with_apply if default_order is not empty
+    if default_order:
+        export_cols = columns_sortable_with_apply(default_order)
+    else:
+        st.warning("No columns available for export/reordering.")
+        export_cols = None
 
     if export_cols:
         def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
