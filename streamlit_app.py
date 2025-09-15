@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 # ---- NEW: Import for drag-and-drop component
-from streamlit_sortables import sortable
+import streamlit_sortables
 
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
 
@@ -92,7 +92,7 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Drag-and-drop Columns Editor with "Apply" flag (streamlit-sortable)
+# Drag-and-drop Columns Editor with "Apply" flag (streamlit-sortables)
 # =============================================================================
 def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
     st.markdown("### Choose export columns & order (drag to reorder below)")
@@ -105,7 +105,7 @@ def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str
         st.session_state["columns_applied"] = True
 
     # Drag-and-drop ordering
-    sorted_cols = sortable(
+    sorted_cols = streamlit_sortables.render_sortable(
         items=st.session_state["pending_export_cols"],
         direction="horizontal",
         key="sortable_export_cols",
