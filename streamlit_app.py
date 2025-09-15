@@ -19,6 +19,9 @@ except Exception:
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+# ---- NEW: Import for drag-and-drop component
+from streamlit_sortable import sortable
+
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
 
 # =============================================================================
@@ -89,10 +92,10 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Multiselect Columns Editor with "Apply" flag (avoids preview/export rerun until Apply is pressed)
+# Drag-and-drop Columns Editor with "Apply" flag (streamlit-sortable)
 # =============================================================================
-def columns_multiselect_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
-    st.markdown("### Choose export columns & order")
+def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
+    st.markdown("### Choose export columns & order (drag to reorder below)")
 
     if "pending_export_cols" not in st.session_state:
         st.session_state["pending_export_cols"] = preferred_order
@@ -101,23 +104,35 @@ def columns_multiselect_with_apply(preferred_order: List[str]) -> Optional[List[
     if "columns_applied" not in st.session_state:
         st.session_state["columns_applied"] = True
 
-    # Multiselect for editing
-    selected = st.multiselect(
-        "Export columns (drag to reorder):",
-        options=preferred_order,
-        default=st.session_state["pending_export_cols"],
-        key="multiselect_pending_export_cols",
-        help="Select and drag columns to set order."
+    # Drag-and-drop ordering
+    sorted_cols = sortable(
+        items=st.session_state["pending_export_cols"],
+        direction="horizontal",
+        key="sortable_export_cols",
+        help="Drag chips left/right to set order."
     )
-    # If selection changed, turn off applied flag
+
+    # Selection
+    all_options = preferred_order
+    selected = st.multiselect(
+        "Add/remove columns (order preserved above):",
+        options=all_options,
+        default=sorted_cols,
+        key="multiselect_export_cols"
+    )
+
+    # If columns changed, disable applied
     if selected != st.session_state["pending_export_cols"]:
         st.session_state["columns_applied"] = False
-    st.session_state["pending_export_cols"] = selected
+
+    # Sync drag order with selection, keep only selected and in sorted order
+    sorted_selected = [c for c in sorted_cols if c in selected]
+    st.session_state["pending_export_cols"] = sorted_selected
 
     col1, col2 = st.columns([1, 2])
     with col1:
         if st.button("Select All"):
-            st.session_state["pending_export_cols"] = preferred_order
+            st.session_state["pending_export_cols"] = all_options
             st.session_state["columns_applied"] = False
         if st.button("Deselect All"):
             st.session_state["pending_export_cols"] = []
@@ -127,7 +142,7 @@ def columns_multiselect_with_apply(preferred_order: List[str]) -> Optional[List[
             st.session_state["export_cols"] = st.session_state["pending_export_cols"]
             st.session_state["columns_applied"] = True
 
-    # Only return exported columns if applied
+    # Only return columns if applied
     if st.session_state["columns_applied"]:
         return st.session_state["export_cols"]
     else:
@@ -363,7 +378,8 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    export_cols = columns_multiselect_with_apply(default_order)
+    # ---- DRAG AND DROP COLUMN SELECTION ----
+    export_cols = columns_sortable_with_apply(default_order)
 
     if export_cols:
         def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
@@ -387,7 +403,7 @@ if st.session_state.get("mapped_ready", False):
             key="dl_both_custom",
         )
     else:
-        st.info("Select columns and press 'Apply changes' to update preview/export.")
+        st.info("Select columns, drag to reorder, and press 'Apply changes' to update preview/export.")
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
