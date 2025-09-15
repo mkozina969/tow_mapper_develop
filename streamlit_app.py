@@ -89,16 +89,17 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Multiselect Columns Editor with Apply Button
+# Multiselect Columns Editor with "Apply" flag (avoids preview/export rerun until Apply is pressed)
 # =============================================================================
-def columns_multiselect_with_apply(preferred_order: List[str]) -> List[str]:
+def columns_multiselect_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
     st.markdown("### Choose export columns & order")
 
-    # Initial state
     if "pending_export_cols" not in st.session_state:
         st.session_state["pending_export_cols"] = preferred_order
     if "export_cols" not in st.session_state:
         st.session_state["export_cols"] = preferred_order
+    if "columns_applied" not in st.session_state:
+        st.session_state["columns_applied"] = True
 
     # Multiselect for editing
     selected = st.multiselect(
@@ -108,20 +109,29 @@ def columns_multiselect_with_apply(preferred_order: List[str]) -> List[str]:
         key="multiselect_pending_export_cols",
         help="Select and drag columns to set order."
     )
+    # If selection changed, turn off applied flag
+    if selected != st.session_state["pending_export_cols"]:
+        st.session_state["columns_applied"] = False
     st.session_state["pending_export_cols"] = selected
 
-    # Buttons for convenience
     col1, col2 = st.columns([1, 2])
     with col1:
         if st.button("Select All"):
             st.session_state["pending_export_cols"] = preferred_order
+            st.session_state["columns_applied"] = False
         if st.button("Deselect All"):
             st.session_state["pending_export_cols"] = []
+            st.session_state["columns_applied"] = False
     with col2:
         if st.button("Apply changes"):
             st.session_state["export_cols"] = st.session_state["pending_export_cols"]
+            st.session_state["columns_applied"] = True
 
-    return st.session_state["export_cols"]
+    # Only return exported columns if applied
+    if st.session_state["columns_applied"]:
+        return st.session_state["export_cols"]
+    else:
+        return None
 
 # =============================================================================
 # Main Script Starts Here (NO CACHING)
@@ -354,29 +364,30 @@ if st.session_state.get("mapped_ready", False):
     default_order = preferred_first + rest
 
     export_cols = columns_multiselect_with_apply(default_order)
-    if not export_cols:
-        export_cols = default_order
 
-    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-        cols_in_df = [c for c in export_cols if c in df.columns]
-        return df[cols_in_df] if cols_in_df else df
+    if export_cols:
+        def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+            cols_in_df = [c for c in export_cols if c in df.columns]
+            return df[cols_in_df] if cols_in_df else df
 
-    matched_out = _apply_selection(matched_en)
-    unmatched_out = _apply_selection(unmatched_en)
+        matched_out = _apply_selection(matched_en)
+        unmatched_out = _apply_selection(unmatched_en)
 
-    with st.expander("Preview (custom): Matched", expanded=False):
-        st.dataframe(matched_out.head(200), use_container_width=True)
+        with st.expander("Preview (custom): Matched", expanded=False):
+            st.dataframe(matched_out.head(200), use_container_width=True)
 
-    with st.expander("Preview (custom): Unmatched", expanded=False):
-        st.dataframe(unmatched_out.head(200), use_container_width=True)
+        with st.expander("Preview (custom): Unmatched", expanded=False):
+            st.dataframe(unmatched_out.head(200), use_container_width=True)
 
-    st.download_button(
-        "⬇️ Download Excel (custom columns & order)",
-        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
-        file_name="mapping_custom.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_both_custom",
-    )
+        st.download_button(
+            "⬇️ Download Excel (custom columns & order)",
+            data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+            file_name="mapping_custom.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_both_custom",
+        )
+    else:
+        st.info("Select columns and press 'Apply changes' to update preview/export.")
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
