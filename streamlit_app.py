@@ -89,38 +89,39 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Multiselect Columns Editor with Key Remount (NO CACHE DECORATORS ALLOWED)
+# Multiselect Columns Editor with Apply Button
 # =============================================================================
-def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
+def columns_multiselect_with_apply(preferred_order: List[str]) -> List[str]:
     st.markdown("### Choose export columns & order")
 
-    # State
+    # Initial state
+    if "pending_export_cols" not in st.session_state:
+        st.session_state["pending_export_cols"] = preferred_order
     if "export_cols" not in st.session_state:
         st.session_state["export_cols"] = preferred_order
-    if "export_cols_key" not in st.session_state:
-        st.session_state["export_cols_key"] = 0
 
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("Select All"):
-            st.session_state["export_cols"] = preferred_order
-            st.session_state["export_cols_key"] += 1  # force widget remount
-        if st.button("Deselect All"):
-            st.session_state["export_cols"] = []
-            st.session_state["export_cols_key"] += 1  # force widget remount
-
-    # Only keep columns present in options
-    default_filtered = [col for col in st.session_state["export_cols"] if col in preferred_order]
-
+    # Multiselect for editing
     selected = st.multiselect(
         "Export columns (drag to reorder):",
         options=preferred_order,
-        default=default_filtered,
-        key=f"multiselect_export_cols_{st.session_state['export_cols_key']}",
+        default=st.session_state["pending_export_cols"],
+        key="multiselect_pending_export_cols",
         help="Select and drag columns to set order."
     )
-    st.session_state["export_cols"] = selected
-    return selected
+    st.session_state["pending_export_cols"] = selected
+
+    # Buttons for convenience
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        if st.button("Select All"):
+            st.session_state["pending_export_cols"] = preferred_order
+        if st.button("Deselect All"):
+            st.session_state["pending_export_cols"] = []
+    with col2:
+        if st.button("Apply changes"):
+            st.session_state["export_cols"] = st.session_state["pending_export_cols"]
+
+    return st.session_state["export_cols"]
 
 # =============================================================================
 # Main Script Starts Here (NO CACHING)
@@ -352,7 +353,7 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    export_cols = columns_multiselect_editor(default_order)
+    export_cols = columns_multiselect_with_apply(default_order)
     if not export_cols:
         export_cols = default_order
 
