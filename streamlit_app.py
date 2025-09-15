@@ -19,7 +19,6 @@ except Exception:
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# ---- NEW: Import for drag-and-drop component
 import streamlit_sortables
 
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
@@ -97,56 +96,66 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
 def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
     st.markdown("### Choose export columns & order (drag to reorder below)")
 
-    # Ensure preferred_order is not empty
+    # Robust: Filter session state columns to only those present in preferred_order
+    def filter_to_options(cols, options):
+        return [c for c in cols if c in options]
+
     if not preferred_order:
         st.warning("No columns available for export/reordering.")
         return None
 
-    if "pending_export_cols" not in st.session_state or not st.session_state["pending_export_cols"]:
-        st.session_state["pending_export_cols"] = preferred_order
-    if "export_cols" not in st.session_state or not st.session_state["export_cols"]:
-        st.session_state["export_cols"] = preferred_order
+    # -- Session state initialization and filtering --
+    if "pending_export_cols" not in st.session_state or not isinstance(st.session_state["pending_export_cols"], list):
+        st.session_state["pending_export_cols"] = preferred_order.copy()
+    else:
+        st.session_state["pending_export_cols"] = filter_to_options(st.session_state["pending_export_cols"], preferred_order)
+        if not st.session_state["pending_export_cols"]:
+            st.session_state["pending_export_cols"] = preferred_order.copy()
+
+    if "export_cols" not in st.session_state or not isinstance(st.session_state["export_cols"], list):
+        st.session_state["export_cols"] = preferred_order.copy()
+    else:
+        st.session_state["export_cols"] = filter_to_options(st.session_state["export_cols"], preferred_order)
+        if not st.session_state["export_cols"]:
+            st.session_state["export_cols"] = preferred_order.copy()
+
     if "columns_applied" not in st.session_state:
         st.session_state["columns_applied"] = True
 
-    # Drag-and-drop ordering (UPDATED: use sort_items instead of sortable)
     sorted_cols = streamlit_sortables.sort_items(
         st.session_state["pending_export_cols"],
         direction="horizontal",
         key="sortable_export_cols"
     )
 
-    # Selection
-    all_options = preferred_order
+    all_options = preferred_order.copy()
+    default_selected = filter_to_options(sorted_cols, all_options)
     selected = st.multiselect(
         "Add/remove columns (order preserved above):",
         options=all_options,
-        default=sorted_cols,
+        default=default_selected,
         key="multiselect_export_cols"
     )
 
-    # If columns changed, disable applied
     if selected != st.session_state["pending_export_cols"]:
         st.session_state["columns_applied"] = False
 
-    # Sync drag order with selection, keep only selected and in sorted order
     sorted_selected = [c for c in sorted_cols if c in selected]
     st.session_state["pending_export_cols"] = sorted_selected
 
     col1, col2 = st.columns([1, 2])
     with col1:
         if st.button("Select All"):
-            st.session_state["pending_export_cols"] = all_options
+            st.session_state["pending_export_cols"] = all_options.copy()
             st.session_state["columns_applied"] = False
         if st.button("Deselect All"):
             st.session_state["pending_export_cols"] = []
             st.session_state["columns_applied"] = False
     with col2:
         if st.button("Apply changes"):
-            st.session_state["export_cols"] = st.session_state["pending_export_cols"]
+            st.session_state["export_cols"] = st.session_state["pending_export_cols"].copy()
             st.session_state["columns_applied"] = True
 
-    # Only return columns if applied
     if st.session_state["columns_applied"]:
         return st.session_state["export_cols"]
     else:
@@ -360,7 +369,6 @@ if st.session_state.get("mapped_ready", False):
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
         df2["Location"] = location_text
-        # Use manual date if provided, otherwise use selected column
         if date_manual:
             df2["date"] = date_manual
         elif date_choice != "(none)" and date_choice in df2.columns:
@@ -370,18 +378,15 @@ if st.session_state.get("mapped_ready", False):
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
-    # --- Ensure Location column is always present ---
     if "Location" not in matched_en.columns:
         matched_en["Location"] = location_text
     if "Location" not in unmatched_en.columns:
         unmatched_en["Location"] = location_text
 
-    # --- Ensure date column is always present ---
     for df in [matched_en, unmatched_en]:
         if "date" not in df.columns:
             df["date"] = date_manual if date_manual else ""
 
-    # Robustly build preferred order, ensure columns are not empty
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     if "date" not in all_cols:
         all_cols.append("date")
@@ -389,7 +394,6 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Only call columns_sortable_with_apply if default_order is not empty
     if default_order:
         export_cols = columns_sortable_with_apply(default_order)
     else:
@@ -428,7 +432,6 @@ else:
 st.divider()
 st.subheader("Admin - Add / Queue / Apply Mappings - Live search")
 
-# --- PIN gate (ENV/Secrets; trim) ---
 expected_pin = os.getenv("ADMIN_PIN", st.secrets.get("ADMIN_PIN", ""))
 expected_pin = str(expected_pin).strip()
 
@@ -447,7 +450,6 @@ if not st.session_state.get("admin_unlocked", False):
 
 st.success("Admin unlocked.")
 
-# ============== ADD A SINGLE MAPPING ==============
 st.markdown("### Add a single mapping")
 
 with st.form("admin_add_single"):
@@ -498,7 +500,6 @@ with st.form("admin_add_single"):
                 except Exception as e:
                     st.error(f"DB error: {e}")
 
-# --- Queue CSV (download/apply/clear) ---
 st.markdown("### Apply queued CSV to DB")
 
 if "updates_df" in st.session_state and not st.session_state["updates_df"].empty:
@@ -540,7 +541,6 @@ if "updates_df" in st.session_state and not st.session_state["updates_df"].empty
 else:
     st.caption("No updates.csv yet.")
 
-# ======================== LIVE SEARCH ========================
 st.markdown("### Live search / inspect")
 
 c_f1, c_f2, c_f3 = st.columns([2.2, 2.2, 1.2])
