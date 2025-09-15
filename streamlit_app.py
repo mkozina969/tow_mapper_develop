@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 # ---- NEW: Import for drag-and-drop component
-from streamlit_sortable import sortable
+from streamlit_sortables import sortable
 
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
 
