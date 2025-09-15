@@ -98,6 +98,9 @@ def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
     if "export_cols" not in st.session_state:
         st.session_state["export_cols"] = preferred_order
 
+    # Ensure default only contains columns present in options
+    default_filtered = [col for col in st.session_state["export_cols"] if col in preferred_order]
+
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("Select All"):
@@ -108,7 +111,7 @@ def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
     selected = st.multiselect(
         "Export columns (drag to reorder):",
         options=preferred_order,
-        default=st.session_state["export_cols"],
+        default=default_filtered,
         key="multiselect_export_cols",
         help="Select and drag columns to set order."
     )
