@@ -105,7 +105,7 @@ def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str
         st.session_state["columns_applied"] = True
 
     # Drag-and-drop ordering
-    sorted_cols = streamlit_sortables.render_sortable(
+    sorted_cols = streamlit_sortables.sortable(
         items=st.session_state["pending_export_cols"],
         direction="horizontal",
         key="sortable_export_cols",
