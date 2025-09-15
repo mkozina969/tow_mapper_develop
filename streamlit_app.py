@@ -365,18 +365,24 @@ if st.session_state.get("mapped_ready", False):
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
-    # ---- Ensure date column is always present ----
-for df in [matched_en, unmatched_en]:
-    if "date" not in df.columns:
-        df["date"] = date_manual if date_manual else ""
+    # --- Ensure Location column is always present ---
+    if "Location" not in matched_en.columns:
+        matched_en["Location"] = location_text
+    if "Location" not in unmatched_en.columns:
+        unmatched_en["Location"] = location_text
 
-# Build preferred order (ALWAYS include 'date')
-all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
-if "date" not in all_cols:
-    all_cols.append("date")
-preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
-rest = [c for c in all_cols if c not in preferred_first]
-default_order = preferred_first + rest
+    # --- Ensure date column is always present ---
+    for df in [matched_en, unmatched_en]:
+        if "date" not in df.columns:
+            df["date"] = date_manual if date_manual else ""
+
+    # Build preferred order (ALWAYS include 'date')
+    all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
+    if "date" not in all_cols:
+        all_cols.append("date")
+    preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
+    rest = [c for c in all_cols if c not in preferred_first]
+    default_order = preferred_first + rest
 
     # ---- DRAG AND DROP COLUMN SELECTION ----
     export_cols = columns_sortable_with_apply(default_order)
