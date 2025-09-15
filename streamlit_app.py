@@ -21,7 +21,7 @@ from sqlalchemy.engine import Engine
 
 import streamlit_sortables
 
-st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
+st.set_page_config(page_title="Supplier → TOW Mapper (Developer DB)", layout="wide")
 
 # =============================================================================
 # Helpers (PURE DATA ONLY; cache allowed)
