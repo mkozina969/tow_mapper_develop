@@ -96,7 +96,6 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
 def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
     st.markdown("### Choose export columns & order (drag to reorder below)")
 
-    # Robust: Filter session state columns to only those present in preferred_order
     def filter_to_options(cols, options):
         return [c for c in cols if c in options]
 
@@ -393,6 +392,11 @@ if st.session_state.get("mapped_ready", False):
     preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
+
+    # --- RESET EXPORT COLUMN SESSION STATE TO CURRENT FILE COLUMNS ---
+    st.session_state["pending_export_cols"] = default_order.copy()
+    st.session_state["export_cols"] = default_order.copy()
+    st.session_state["columns_applied"] = True
 
     if default_order:
         export_cols = columns_sortable_with_apply(default_order)
