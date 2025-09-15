@@ -164,7 +164,7 @@ def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str
 # Main Script Starts Here (NO CACHING)
 # =============================================================================
 
-st.title("Supplier → TOW Mapper (Cloud DB)")
+st.title("Supplier → TOW Mapper (Developer DB)")
 with st.expander("How to use", expanded=False):
     st.markdown("""
 1) Učitaj račun (Excel/CSV/PDF).  
