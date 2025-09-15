@@ -19,9 +19,6 @@ except Exception:
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# ---- NEW: Import for drag-and-drop component
-import streamlit_sortables
-
 st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
 
 # =============================================================================
@@ -92,65 +89,31 @@ def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
         return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Drag-and-drop Columns Editor with "Apply" flag (streamlit-sortables)
+# Multiselect Columns Editor (NO CACHE DECORATORS ALLOWED)
 # =============================================================================
-def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
-    st.markdown("### Choose export columns & order (drag to reorder below)")
+def columns_multiselect_editor(preferred_order: List[str]) -> List[str]:
+    st.markdown("### Choose export columns & order")
 
-    # Ensure preferred_order is not empty
-    if not preferred_order:
-        st.warning("No columns available for export/reordering.")
-        return None
-
-    if "pending_export_cols" not in st.session_state or not st.session_state["pending_export_cols"]:
-        st.session_state["pending_export_cols"] = preferred_order
-    if "export_cols" not in st.session_state or not st.session_state["export_cols"]:
+    # State
+    if "export_cols" not in st.session_state:
         st.session_state["export_cols"] = preferred_order
-    if "columns_applied" not in st.session_state:
-        st.session_state["columns_applied"] = True
 
-    # Drag-and-drop ordering (UPDATED: use sort_items instead of sortable)
-    sorted_cols = streamlit_sortables.sort_items(
-        st.session_state["pending_export_cols"],
-        direction="horizontal",
-        key="sortable_export_cols"
-    )
-
-    # Selection
-    all_options = preferred_order
-    selected = st.multiselect(
-        "Add/remove columns (order preserved above):",
-        options=all_options,
-        default=sorted_cols,
-        key="multiselect_export_cols"
-    )
-
-    # If columns changed, disable applied
-    if selected != st.session_state["pending_export_cols"]:
-        st.session_state["columns_applied"] = False
-
-    # Sync drag order with selection, keep only selected and in sorted order
-    sorted_selected = [c for c in sorted_cols if c in selected]
-    st.session_state["pending_export_cols"] = sorted_selected
-
-    col1, col2 = st.columns([1, 2])
+    col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("Select All"):
-            st.session_state["pending_export_cols"] = all_options
-            st.session_state["columns_applied"] = False
+            st.session_state["export_cols"] = preferred_order
         if st.button("Deselect All"):
-            st.session_state["pending_export_cols"] = []
-            st.session_state["columns_applied"] = False
-    with col2:
-        if st.button("Apply changes"):
-            st.session_state["export_cols"] = st.session_state["pending_export_cols"]
-            st.session_state["columns_applied"] = True
+            st.session_state["export_cols"] = []
 
-    # Only return columns if applied
-    if st.session_state["columns_applied"]:
-        return st.session_state["export_cols"]
-    else:
-        return None
+    selected = st.multiselect(
+        "Export columns (drag to reorder):",
+        options=preferred_order,
+        default=st.session_state["export_cols"],
+        key="multiselect_export_cols",
+        help="Select and drag columns to set order."
+    )
+    st.session_state["export_cols"] = selected
+    return selected
 
 # =============================================================================
 # Main Script Starts Here (NO CACHING)
@@ -376,49 +339,36 @@ if st.session_state.get("mapped_ready", False):
     if "Location" not in unmatched_en.columns:
         unmatched_en["Location"] = location_text
 
-    # --- Ensure date column is always present ---
-    for df in [matched_en, unmatched_en]:
-        if "date" not in df.columns:
-            df["date"] = date_manual if date_manual else ""
-
-    # Robustly build preferred order, ensure columns are not empty
+    # Build preferred order
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
-    if "date" not in all_cols:
-        all_cols.append("date")
     preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Only call columns_sortable_with_apply if default_order is not empty
-    if default_order:
-        export_cols = columns_sortable_with_apply(default_order)
-    else:
-        st.warning("No columns available for export/reordering.")
-        export_cols = None
+    export_cols = columns_multiselect_editor(default_order)
+    if not export_cols:
+        export_cols = default_order
 
-    if export_cols:
-        def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-            cols_in_df = [c for c in export_cols if c in df.columns]
-            return df[cols_in_df] if cols_in_df else df
+    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+        cols_in_df = [c for c in export_cols if c in df.columns]
+        return df[cols_in_df] if cols_in_df else df
 
-        matched_out = _apply_selection(matched_en)
-        unmatched_out = _apply_selection(unmatched_en)
+    matched_out = _apply_selection(matched_en)
+    unmatched_out = _apply_selection(unmatched_en)
 
-        with st.expander("Preview (custom): Matched", expanded=False):
-            st.dataframe(matched_out.head(200), use_container_width=True)
+    with st.expander("Preview (custom): Matched", expanded=False):
+        st.dataframe(matched_out.head(200), use_container_width=True)
 
-        with st.expander("Preview (custom): Unmatched", expanded=False):
-            st.dataframe(unmatched_out.head(200), use_container_width=True)
+    with st.expander("Preview (custom): Unmatched", expanded=False):
+        st.dataframe(unmatched_out.head(200), use_container_width=True)
 
-        st.download_button(
-            "⬇️ Download Excel (custom columns & order)",
-            data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
-            file_name="mapping_custom.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_both_custom",
-        )
-    else:
-        st.info("Select columns, drag to reorder, and press 'Apply changes' to update preview/export.")
+    st.download_button(
+        "⬇️ Download Excel (custom columns & order)",
+        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+        file_name="mapping_custom.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_both_custom",
+    )
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
