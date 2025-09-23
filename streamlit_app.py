@@ -363,7 +363,7 @@ if st.session_state.get("mapped_ready", False):
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
 
     def _enrich(df: pd.DataFrame) -> pd.DataFrame:
-        df2 = df.copy()
+                    df2 = df.copy()
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
@@ -372,7 +372,7 @@ if st.session_state.get("mapped_ready", False):
             df2["date"] = date_manual
         elif date_choice != "(none)" and date_choice in df2.columns:
             df2["date"] = df2[date_choice]
-        return df2
+                    return df2
 
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
@@ -411,23 +411,23 @@ if st.session_state.get("mapped_ready", False):
 
         matched_out = _apply_selection(matched_en)
         unmatched_out = _apply_selection(unmatched_en)
-
-        # --- NEW: allow forcing selected columns to TEXT (string) for export ---
-        text_cols = st.multiselect(
+                # --- NEW: allow forcing selected columns to TEXT (string) for export ---
+                text_cols = st.multiselect(
             "Force these columns to TEXT (strings) in the exported Excel",
-             options=export_cols,
-             help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
-         )
-def _force_text(df: pd.DataFrame) -> pd.DataFrame:
-    if not text_cols:
-        return df
-    df2 = df.copy()
-    for c in text_cols:
-        if c in df2.columns:
-            df2[c] = df2[c].astype("string").fillna("")
-    return df2
-matched_out = _force_text(matched_out)
-unmatched_out = _force_text(unmatched_out)
+            options=export_cols,
+            help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+        )
+                def _force_text(df: pd.DataFrame) -> pd.DataFrame:
+                        if not text_cols:
+                return df
+                        df2 = df.copy()
+                        for c in text_cols:
+                                if c in df2.columns:
+                                        df2[c] = df2[c].astype("string").fillna("")
+                        return df2
+                matched_out = _force_text(matched_out)
+                unmatched_out = _force_text(unmatched_out)
+
 
         with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
@@ -436,7 +436,7 @@ unmatched_out = _force_text(unmatched_out)
             st.dataframe(unmatched_out.head(200), use_container_width=True)
 
         st.download_button(
-            "⬇️ Download Excel (custom columns & order)",
+            ⬇️ Download Excel (custom columns & order)",
             data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
             file_name="mapping_custom.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
