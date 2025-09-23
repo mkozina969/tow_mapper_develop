@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -19,58 +20,19 @@ except Exception:
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-st.set_page_config(page_title="Supplier → TOW Mapper (Cloud DB)", layout="wide")
+import streamlit_sortables
+
+st.set_page_config(page_title="Supplier → TOW Mapper (Developer DB)", layout="wide")
 
 # =============================================================================
-# Helpers
+# Helpers (PURE DATA ONLY; cache allowed)
 # =============================================================================
-def _excel_bytes(
-    dfs: Dict[str, pd.DataFrame],
-    text_cols: Dict[str, List[str]] | None = None
-) -> bytes:
-    """
-    Write multiple DataFrames to Excel. If text_cols is provided, it should be
-    a dict like {"Matched": ["PkgIdentNumber_1", ...], "Unmatched": [...]}.
-    Those columns are formatted as TEXT in Excel (keep leading zeros, no sci-not).
-    """
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-        text_fmt = w.book.add_format({"num_format": "@"})  # TEXT format
-        for sheet, df in dfs.items():
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet)
-                if text_cols and sheet in text_cols:
-                    ws = w.sheets[sheet]
-                    for col in [c for c in text_cols[sheet] if c in df.columns]:
-                        idx = int(df.columns.get_loc(col))
-                        ws.set_column(idx, idx, None, text_fmt)
-    return bio.getvalue()
-
-
-def _engine() -> Engine:
-    db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
-    if not db_url:
-        st.error("DATABASE_URL nije postavljen (Secrets ili env).")
-        st.stop()
-    return create_engine(db_url, pool_pre_ping=True)
-
-
-engine = _engine()
-
-
-def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
-    with engine.connect() as conn:
-        return pd.read_sql(text(query), conn, params=params or {})
-
-
 @st.cache_data(show_spinner=False)
 def _crosswalk_count() -> int:
     return int(_read_sql("SELECT COUNT(*) AS n FROM crosswalk").iloc[0]["n"])
 
-
 @st.cache_data(show_spinner=False)
 def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
-    """Return vendor list with '' (GLOBAL) first; no LIKE when filter is blank."""
     filter_q = (filter_q or "").strip()
     if filter_q:
         q = """
@@ -98,10 +60,8 @@ def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
         vals = [""] + [v for v in vals if v != ""]
     return vals
 
-
 @st.cache_data(show_spinner=False)
 def _load_vendor_names() -> Dict[str, str]:
-    """Return {vendor_id -> vendor_name} from vendors table (if exists)."""
     try:
         df = _read_sql("SELECT vendor_id, vendor_name FROM vendors")
     except Exception:
@@ -110,72 +70,102 @@ def _load_vendor_names() -> Dict[str, str]:
     df["vendor_name"] = df["vendor_name"].fillna("").astype(str).str.strip()
     return dict(zip(df["vendor_id"], df["vendor_name"]))
 
+def _excel_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
+        for sheet, df in dfs.items():
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet)
+    return bio.getvalue()
 
-def _columns_editor(default_order: List[str]) -> List[str]:
-    """
-    Robust column chooser that works across Streamlit versions.
-    Returns the ordered list of columns to export.
-    """
-    cfg_default = pd.DataFrame({
-        "column": default_order,
-        "include": True,
-        "order": list(range(1, len(default_order) + 1)),
-    })
+def _engine() -> Engine:
+    db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
+    if not db_url:
+        st.error("DATABASE_URL nije postavljen (Secrets ili env).")
+        st.stop()
+    return create_engine(db_url, pool_pre_ping=True)
 
-    st.markdown("### Choose export columns & order")
+engine = _engine()
 
-    _editor_kwargs = dict(hide_index=True, use_container_width=True)
-
-    try:
-        cfg = st.data_editor(
-            cfg_default,
-            key="export_editor",
-            **_editor_kwargs,
-            column_config={
-                "column": st.column_config.TextColumn("Column", disabled=True),
-                "include": st.column_config.CheckboxColumn("Include"),
-                "order": st.column_config.NumberColumn("Order", min_value=1, step=1),
-            },
-            help="Označi kolone i dodijeli redoslijed (1..N).",
-        )
-    except TypeError:
-        st.info("Using a basic column editor (advanced column_config not supported on this deployment).")
-        cfg = st.data_editor(cfg_default, key="export_editor_basic", **_editor_kwargs)
-
-    cfg["order"] = pd.to_numeric(cfg["order"], errors="coerce")
-    cfg = cfg.dropna(subset=["order"])
-    cfg = cfg[cfg["include"]].sort_values(["order", "column"], kind="stable")
-    export_cols = cfg["column"].tolist()
-    return export_cols
-
-
-def _suggest_text_cols(df: pd.DataFrame) -> List[str]:
-    """
-    Suggest columns that contain long digit strings (>=12) likely to be IDs/EANs.
-    """
-    out = []
-    for c in df.columns:
-        try:
-            lens = df[c].astype(str).str.replace(r"\D", "", regex=True).str.len()
-            m = lens.dropna().max()
-            if pd.notna(m) and m >= 12:
-                out.append(c)
-        except Exception:
-            pass
-    return out
-
-
-def _coerce_cols_to_text(df: pd.DataFrame, cols: List[str]) -> None:
-    """In-place: force selected columns to plain strings."""
-    for c in cols:
-        if c in df.columns:
-            df[c] = df[c].apply(lambda v: "" if pd.isna(v) else str(v))
-
+def _read_sql(query: str, params: dict | None = None) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn, params=params or {})
 
 # =============================================================================
-# Header
+# Drag-and-drop Columns Editor with "Apply" flag (streamlit-sortables)
 # =============================================================================
-st.title("Supplier → TOW Mapper (Cloud DB)")
+def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str]]:
+    st.markdown("### Choose export columns & order (drag to reorder below)")
+
+    def filter_to_options(cols, options):
+        return [c for c in cols if c in options]
+
+    if not preferred_order:
+        st.warning("No columns available for export/reordering.")
+        return None
+
+    # -- Session state initialization and filtering --
+    if "pending_export_cols" not in st.session_state or not isinstance(st.session_state["pending_export_cols"], list):
+        st.session_state["pending_export_cols"] = preferred_order.copy()
+    else:
+        st.session_state["pending_export_cols"] = filter_to_options(st.session_state["pending_export_cols"], preferred_order)
+        if not st.session_state["pending_export_cols"]:
+            st.session_state["pending_export_cols"] = preferred_order.copy()
+
+    if "export_cols" not in st.session_state or not isinstance(st.session_state["export_cols"], list):
+        st.session_state["export_cols"] = preferred_order.copy()
+    else:
+        st.session_state["export_cols"] = filter_to_options(st.session_state["export_cols"], preferred_order)
+        if not st.session_state["export_cols"]:
+            st.session_state["export_cols"] = preferred_order.copy()
+
+    if "columns_applied" not in st.session_state:
+        st.session_state["columns_applied"] = True
+
+    sorted_cols = streamlit_sortables.sort_items(
+        st.session_state["pending_export_cols"],
+        direction="horizontal",
+        key="sortable_export_cols"
+    )
+
+    all_options = preferred_order.copy()
+    default_selected = filter_to_options(sorted_cols, all_options)
+    selected = st.multiselect(
+        "Add/remove columns (order preserved above):",
+        options=all_options,
+        default=default_selected,
+        key="multiselect_export_cols"
+    )
+
+    if selected != st.session_state["pending_export_cols"]:
+        st.session_state["columns_applied"] = False
+
+    sorted_selected = [c for c in sorted_cols if c in selected]
+    st.session_state["pending_export_cols"] = sorted_selected
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        if st.button("Select All"):
+            st.session_state["pending_export_cols"] = all_options.copy()
+            st.session_state["columns_applied"] = False
+        if st.button("Deselect All"):
+            st.session_state["pending_export_cols"] = []
+            st.session_state["columns_applied"] = False
+    with col2:
+        if st.button("Apply changes"):
+            st.session_state["export_cols"] = st.session_state["pending_export_cols"].copy()
+            st.session_state["columns_applied"] = True
+
+    if st.session_state["columns_applied"]:
+        return st.session_state["export_cols"]
+    else:
+        return None
+
+# =============================================================================
+# Main Script Starts Here (NO CACHING)
+# =============================================================================
+
+st.title("Supplier → TOW Mapper (Developer DB)")
 with st.expander("How to use", expanded=False):
     st.markdown("""
 1) Učitaj račun (Excel/CSV/PDF).  
@@ -191,20 +181,12 @@ try:
 except Exception as e:
     st.warning(f"Ne mogu pročitati broj redaka crosswalka: {e}")
 
-# =============================================================================
-# Vendor select: filter + refresh (+ vendor names)
-# =============================================================================
 vendors_map = _load_vendor_names()
 
 st.markdown("**Vendor**")
-cc1, cc2 = st.columns([3, 1])
-with cc1:
-    vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
-with cc2:
-    if st.button("Refresh list", key="btn_refresh_vendors"):
-        st.cache_data.clear()
-
+vendor_filter = st.text_input("Filter vendors (substring / prefix)", value="", key="vendor_filter")
 vendors = _fetch_vendors(vendor_filter)
+
 prev_vendor = st.session_state.get("vendor_select", "")
 if prev_vendor not in vendors:
     prev_vendor = ""  # GLOBAL
@@ -265,17 +247,6 @@ if uploaded is not None:
         if isinstance(preview_df, pd.DataFrame):
             st.caption(f"📄 Kolone: {', '.join(map(str, preview_df.columns))}")
             st.dataframe(preview_df.head(200), use_container_width=True)
-
-            # ---------- TEXT columns chooser ----------
-            with st.expander("Treat columns as TEXT (preserve long numbers / leading zeros)", expanded=False):
-                default_text_cols = st.session_state.get("text_cols_sel") or _suggest_text_cols(preview_df)
-                text_cols_sel = st.multiselect(
-                    "Select columns to force as TEXT",
-                    options=list(preview_df.columns),
-                    default=default_text_cols,
-                    key="text_cols_sel"
-                )
-                st.caption("Selected columns will be kept as strings and exported as TEXT to Excel.")
     except Exception as e:
         st.error(f"Greška pri čitanju datoteke: {e}")
         preview_df = None
@@ -307,13 +278,7 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
 
     if st.button("Run mapping", type="primary", key="btn_run_mapping"):
         try:
-            # Force selected columns to TEXT BEFORE mapping
-            chosen_text_cols = st.session_state.get("text_cols_sel", []) or []
-            df_sup = preview_df.copy()
-            _coerce_cols_to_text(df_sup, chosen_text_cols)
-
-            # Continue as before
-            df_sup = df_sup.rename(columns={supplier_col: "supplier_id"})
+            df_sup = preview_df.rename(columns={supplier_col: "supplier_id"}).copy()
             df_sup["supplier_id"] = df_sup["supplier_id"].astype(str).str.strip()
             vparam = (vendor or "").strip()
 
@@ -343,7 +308,7 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             st.error(f"Mapping failed: {e}")
             st.session_state["mapped_ready"] = False
 
-# Show result if available
+# Show result if available (NO cached function context here)
 if st.session_state.get("mapped_ready", False):
     matched = st.session_state["matched"]
     unmatched = st.session_state["unmatched"]
@@ -356,38 +321,31 @@ if st.session_state.get("mapped_ready", False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
     # -----------------------------------------------------------------------------
-    # 2a) SIMPLE EXPORT (TEXT-aware)
+    # 2a) OLD / SIMPLE EXPORT
     # -----------------------------------------------------------------------------
-    _text_cols = st.session_state.get("text_cols_sel", []) or []
-    text_map_simple = {
-        "Matched": [c for c in _text_cols if c in matched.columns],
-        "Unmatched": [c for c in _text_cols if c in unmatched.columns],
-    }
-
     st.download_button(
         "Download Excel (Matched + Unmatched)",
-        data=_excel_bytes({"Matched": matched, "Unmatched": unmatched}, text_cols=text_map_simple),
+        data=_excel_bytes({"Matched": matched, "Unmatched": unmatched}),
         file_name="mapping_result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_simple_both",
     )
 
     # -----------------------------------------------------------------------------
-    # 2b) Custom export (add Invoice/Item/vendor_id/location/date + choose order)
+    # 2b) Custom export (add Invoice/Item/vendor_id/date/location + choose columns & order)
     # -----------------------------------------------------------------------------
     st.subheader("3) Custom export (add columns + choose order)")
 
     invoice_label = "Invoice"
     item_label = "Item"
     vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
-    location_label = "H00"       # NEW: Location constant
-    manual_date = ""             # NEW: Manual date override (YYYY-MM-DD)
-    date_choice = "(none)"
-
+    location_text = "H00"
     all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
+    date_choice = "(none)"
+    date_manual = ""
 
     with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, location, date)", expanded=True):
-        cA, cB, cC, cD, cE = st.columns([1, 1, 1.3, 1, 1.3])
+        cA, cB, cC, cD, cE = st.columns([1, 1, 1.2, 1.2, 1.2])
         with cA:
             invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
         with cB:
@@ -395,12 +353,12 @@ if st.session_state.get("mapped_ready", False):
         with cC:
             vendor_to_stamp = st.text_input(
                 "vendor_id to stamp on export",
-                value=(vendor if vendor != "" else "DOB0000025")  # put your default if needed
+                value=(vendor if vendor != "" else "GLOBAL")
             ).strip().upper() or "GLOBAL"
         with cD:
-            location_label = st.text_input("Constant value for 'Location'", value="H00")
+            location_text = st.text_input("Constant value for 'Location'", value="H00")
         with cE:
-            manual_date = st.text_input("Manual Date (YYYY-MM-DD)", value="")
+            date_manual = st.text_input("Manual Date (YYYY-MM-DD)", value="")
 
         date_options = ["(none)"] + all_cols_now
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
@@ -410,10 +368,9 @@ if st.session_state.get("mapped_ready", False):
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
-        df2["Location"] = location_label
-        # date priority: manual > chosen column > none
-        if manual_date.strip():
-            df2["date"] = manual_date.strip()
+        df2["Location"] = location_text
+        if date_manual:
+            df2["date"] = date_manual
         elif date_choice != "(none)" and date_choice in df2.columns:
             df2["date"] = df2[date_choice]
         return df2
@@ -421,43 +378,76 @@ if st.session_state.get("mapped_ready", False):
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
-    # Build preferred order
+    if "Location" not in matched_en.columns:
+        matched_en["Location"] = location_text
+    if "Location" not in unmatched_en.columns:
+        unmatched_en["Location"] = location_text
+
+    for df in [matched_en, unmatched_en]:
+        if "date" not in df.columns:
+            df["date"] = date_manual if date_manual else ""
+
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
+    if "date" not in all_cols:
+        all_cols.append("date")
     preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Ordered column selection (robust)
-    export_cols = _columns_editor(default_order)
-    if not export_cols:
-        export_cols = default_order
+    # --- RESET EXPORT COLUMN SESSION STATE TO CURRENT FILE COLUMNS ---
+    st.session_state["pending_export_cols"] = default_order.copy()
+    st.session_state["export_cols"] = default_order.copy()
+    st.session_state["columns_applied"] = True
 
-    def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
-        cols_in_df = [c for c in export_cols if c in df.columns]
-        return df[cols_in_df] if cols_in_df else df
+    if default_order:
+        export_cols = columns_sortable_with_apply(default_order)
+    else:
+        st.warning("No columns available for export/reordering.")
+        export_cols = None
 
-    matched_out = _apply_selection(matched_en)
-    unmatched_out = _apply_selection(unmatched_en)
+    if export_cols:
+        def _apply_selection(df: pd.DataFrame) -> pd.DataFrame:
+            cols_in_df = [c for c in export_cols if c in df.columns]
+            return df[cols_in_df] if cols_in_df else df
 
-    with st.expander("Preview (custom): Matched", expanded=False):
-        st.dataframe(matched_out.head(200), use_container_width=True)
+        matched_out = _apply_selection(matched_en)
+        unmatched_out = _apply_selection(unmatched_en)
 
-    with st.expander("Preview (custom): Unmatched", expanded=False):
-        st.dataframe(unmatched_out.head(200), use_container_width=True)
+# Choose columns to force as TEXT in the export to prevent large-number issues (e.g., 2^53 limit)
+text_cols = st.multiselect(
+    "Force these columns to TEXT (strings) in the exported Excel",
+    options=export_cols,
+    help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+)
 
-    _text_cols = st.session_state.get("text_cols_sel", []) or []
-    text_map_custom = {
-        "Matched": [c for c in _text_cols if c in matched_out.columns],
-        "Unmatched": [c for c in _text_cols if c in unmatched_out.columns],
-    }
+def _force_text(df: pd.DataFrame) -> pd.DataFrame:
+    if not text_cols:
+        return df
+    df2 = df.copy()
+    for c in text_cols:
+        if c in df2.columns:
+            # Use pandas string dtype and keep NaNs empty so Excel gets plain strings
+            df2[c] = df2[c].astype("string").fillna("")
+    return df2
 
-    st.download_button(
-        "⬇️ Download Excel (custom columns & order)",
-        data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}, text_cols=text_map_custom),
-        file_name="mapping_custom.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="dl_both_custom",
-    )
+matched_out = _force_text(matched_out)
+unmatched_out = _force_text(unmatched_out)
+        
+with st.expander("Preview (custom): Matched", expanded=False):
+            st.dataframe(matched_out.head(200), use_container_width=True)
+
+        with st.expander("Preview (custom): Unmatched", expanded=False):
+            st.dataframe(unmatched_out.head(200), use_container_width=True)
+
+        st.download_button(
+            "⬇️ Download Excel (custom columns & order)",
+            data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
+            file_name="mapping_custom.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_both_custom",
+        )
+    else:
+        st.info("Select columns, drag to reorder, and press 'Apply changes' to update preview/export.")
 else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
@@ -467,8 +457,7 @@ else:
 st.divider()
 st.subheader("Admin - Add / Queue / Apply Mappings - Live search")
 
-# --- PIN gate (ENV/Secrets; trim) ---
-expected_pin = os.getenv("ADMIN_PIN", st.secrets.get("ADMIN_PIN", ""))
+expected_pin = os.getenv("ADMIN_PIN") or st.secrets.get("ADMIN_PIN", "")
 expected_pin = str(expected_pin).strip()
 
 c_pin1, c_pin2, c_pin3 = st.columns([5, 1, 2])
@@ -486,7 +475,6 @@ if not st.session_state.get("admin_unlocked", False):
 
 st.success("Admin unlocked.")
 
-# ============== ADD A SINGLE MAPPING ==============
 st.markdown("### Add a single mapping")
 
 with st.form("admin_add_single"):
@@ -537,7 +525,6 @@ with st.form("admin_add_single"):
                 except Exception as e:
                     st.error(f"DB error: {e}")
 
-# --- Queue CSV (download/apply/clear) ---
 st.markdown("### Apply queued CSV to DB")
 
 if "updates_df" in st.session_state and not st.session_state["updates_df"].empty:
@@ -579,7 +566,6 @@ if "updates_df" in st.session_state and not st.session_state["updates_df"].empty
 else:
     st.caption("No updates.csv yet.")
 
-# ======================== LIVE SEARCH ========================
 st.markdown("### Live search / inspect")
 
 c_f1, c_f2, c_f3 = st.columns([2.2, 2.2, 1.2])
