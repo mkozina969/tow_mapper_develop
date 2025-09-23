@@ -410,26 +410,29 @@ if st.session_state.get("mapped_ready", False):
             cols_in_df = [c for c in export_cols if c in df.columns]
             return df[cols_in_df] if cols_in_df else df
 
-# Choose columns to force as TEXT in the export to prevent large-number issues (e.g., 2^53 limit)
-text_cols = st.multiselect(
-    "Force these columns to TEXT (strings) in the exported Excel",
-    options=export_cols,
-    help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
-)
-
-def _force_text(df: pd.DataFrame) -> pd.DataFrame:
-    if not text_cols:
-        return df
-    df2 = df.copy()
-    for c in text_cols:
-        if c in df2.columns:
-            # Use pandas string dtype and keep NaNs empty so Excel gets plain strings
-            df2[c] = df2[c].astype("string").fillna("")
-    return df2
-
 matched_out = _force_text(matched_out)
 unmatched_out = _force_text(unmatched_out)
-        
+
+ # === NEW: Force selected columns to TEXT (string dtype) before export ===
+    text_cols = st.multiselect(
+        "Force these columns to TEXT (strings) in the exported Excel",
+        options=export_cols,
+        help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+    )
+
+    def _force_text(df: pd.DataFrame) -> pd.DataFrame:
+        if not text_cols:
+            return df
+        df2 = df.copy()
+        for c in text_cols:
+            if c in df2.columns:
+                df2[c] = df2[c].astype("string").fillna("")
+        return df2
+
+    matched_out = _force_text(matched_out)
+    unmatched_out = _force_text(unmatched_out)
+    # === END NEW ===
+
 with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
 
