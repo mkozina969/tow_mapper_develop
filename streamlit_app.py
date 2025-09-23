@@ -411,12 +411,13 @@ if st.session_state.get("mapped_ready", False):
 
         matched_out = _apply_selection(matched_en)
         unmatched_out = _apply_selection(unmatched_en)
-# --- NEW: allow forcing selected columns to TEXT (string) for export ---
-text_cols = st.multiselect(
-    "Force these columns to TEXT (strings) in the exported Excel",
-    options=export_cols,
-    help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
-)
+
+        # --- NEW: allow forcing selected columns to TEXT (string) for export ---
+        text_cols = st.multiselect(
+            "Force these columns to TEXT (strings) in the exported Excel",
+             options=export_cols,
+             help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+         )
 def _force_text(df: pd.DataFrame) -> pd.DataFrame:
     if not text_cols:
         return df
