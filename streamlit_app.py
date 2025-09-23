@@ -54,7 +54,6 @@ def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
         params = {"lim": limit}
     df = _read_sql(q, params)
     vals = [str(x or "") for x in df["vendor_id"].tolist()]
-    # Ensure blank GLOBAL option at top
     if "" not in vals:
         vals.insert(0, "")
     else:
@@ -106,7 +105,6 @@ def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str
         st.warning("No columns available for export/reordering.")
         return None
 
-    # Initialize only if not set
     if "pending_export_cols" not in st.session_state:
         st.session_state["pending_export_cols"] = preferred_order.copy()
     else:
@@ -227,7 +225,7 @@ if uploaded is not None:
                 dialect = csv.Sniffer().sniff(first_line)
                 sep = dialect.delimiter
             except Exception:
-                sep = ","  # fallback
+                sep = ","
             preview_df = pd.read_csv(BytesIO(uploaded.getvalue()), sep=sep)
         elif suffix == ".pdf":
             if not _HAS_PDF:
@@ -286,14 +284,12 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             vparam = (vendor or "").strip()
 
             if vparam:
-                # Vendor specific or GLOBAL fallback
                 df_map = _read_sql("""
                     SELECT vendor_id, supplier_id, tow_code
                     FROM crosswalk
                     WHERE vendor_id = :v OR vendor_id = ''
                 """, {"v": vparam})
             else:
-                # GLOBAL only + all vendor-specific (kept for previous behavior)
                 df_map = _read_sql("""
                     SELECT vendor_id, supplier_id, tow_code
                     FROM crosswalk
@@ -319,7 +315,7 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             st.error(f"Mapping failed: {e}")
             st.session_state["mapped_ready"] = False
 
-# Show result if available (NO cached function context here)
+# Show result if available
 if st.session_state.get("mapped_ready", False):
     matched = st.session_state["matched"]
     unmatched = st.session_state["unmatched"]
@@ -332,7 +328,7 @@ if st.session_state.get("mapped_ready", False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
     # -----------------------------------------------------------------------------
-    # 2a) OLD / SIMPLE EXPORT
+    # 2a) Simple export
     # -----------------------------------------------------------------------------
     st.download_button(
         "Download Excel (Matched + Unmatched)",
@@ -343,7 +339,7 @@ if st.session_state.get("mapped_ready", False):
     )
 
     # -----------------------------------------------------------------------------
-    # 2b) Custom export (add Invoice/Item/vendor_id/date/location + choose columns & order)
+    # 2b) Custom export with Croatian date support
     # -----------------------------------------------------------------------------
     st.subheader("3) Custom export (add columns + choose order)")
 
@@ -353,10 +349,11 @@ if st.session_state.get("mapped_ready", False):
     location_text = "H00"
     all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
     date_choice = "(none)"
-    date_manual = ""
+    date_manual_raw = ""
+    date_output_format = "DD.MM.YY"
 
     with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, location, date)", expanded=True):
-        cA, cB, cC, cD, cE = st.columns([1, 1, 1.2, 1.2, 1.2])
+        cA, cB, cC, cD, cE = st.columns([1, 1, 1.2, 1.2, 1.7])
         with cA:
             invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
         with cB:
@@ -369,18 +366,54 @@ if st.session_state.get("mapped_ready", False):
         with cD:
             location_text = st.text_input("Constant value for 'Location'", value="H00")
         with cE:
-            date_manual = st.text_input("Manual Date (YYYY-MM-DD)", value="")
-
-        # Validate manual date if provided
-        if date_manual:
-            try:
-                datetime.strptime(date_manual, "%Y-%m-%d")
-            except ValueError:
-                st.warning("Manual date nije validan format (YYYY-MM-DD). Bit će ignoriran.")
-                date_manual = ""
+            date_manual_raw = st.text_input("Manual Date (HR: DD.MM.YY ili DD.MM.YYYY)", value="")
 
         date_options = ["(none)"] + all_cols_now
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
+
+        date_output_format = st.selectbox(
+            "Output date format",
+            options=["DD.MM.YY", "DD.MM.YYYY", "YYYY-MM-DD (ISO)"],
+            index=0,
+            help="Kako će se datum zapisati u exportu."
+        )
+
+    def _try_parse_manual(raw: str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        norm = raw.replace("/", ".").replace("-", ".")
+        for fmt in ("%d.%m.%y", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(norm, fmt)
+            except ValueError:
+                pass
+        st.warning(f"Ne mogu parsirati manual date: '{raw}'. Zanemarujem.")
+        return None
+
+    def _format_out(dt: datetime | None):
+        if dt is None:
+            return ""
+        if date_output_format == "DD.MM.YY":
+            return dt.strftime("%d.%m.%y")
+        if date_output_format == "DD.MM.YYYY":
+            return dt.strftime("%d.%m.%Y")
+        return dt.strftime("%Y-%m-%d")
+
+    manual_dt = _try_parse_manual(date_manual_raw)
+
+    def _extract_date_series(df: pd.DataFrame):
+        if manual_dt:
+            return pd.Series([_format_out(manual_dt)] * len(df), index=df.index)
+        if date_choice != "(none)" and date_choice in df.columns:
+            col = df[date_choice]
+            try:
+                parsed = pd.to_datetime(col, errors="coerce", dayfirst=True)
+                return parsed.apply(lambda x: _format_out(x.to_pydatetime()) if pd.notna(x) else "")
+            except Exception:
+                st.warning(f"Ne mogu parsirati vrijednosti iz kolone '{date_choice}' u datume.")
+                return pd.Series([""] * len(df), index=df.index)
+        return pd.Series([""] * len(df), index=df.index)
 
     def _enrich(df: pd.DataFrame) -> pd.DataFrame:
         df2 = df.copy()
@@ -388,20 +421,15 @@ if st.session_state.get("mapped_ready", False):
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
         df2["Location"] = location_text
-        if date_manual:
-            df2["date"] = date_manual
-        elif date_choice != "(none)" and date_choice in df2.columns:
-            df2["date"] = df2[date_choice]
+        df2["date"] = _extract_date_series(df2)
         return df2
 
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
     for df_ref in [matched_en, unmatched_en]:
-        if "Location" not in df_ref.columns:
-            df_ref["Location"] = location_text
         if "date" not in df_ref.columns:
-            df_ref["date"] = date_manual if date_manual else ""
+            df_ref["date"] = ""
 
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     if "date" not in all_cols:
@@ -410,7 +438,6 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Initialize export column state only when column signature changes
     col_signature: Tuple[str, ...] = tuple(default_order)
     if st.session_state.get("_export_col_signature") != col_signature:
         st.session_state["_export_col_signature"] = col_signature
@@ -435,7 +462,7 @@ if st.session_state.get("mapped_ready", False):
         text_cols = st.multiselect(
             "Force these columns to TEXT (strings) in the exported Excel",
             options=export_cols,
-            help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+            help="Koristi za šifre (da Excel ne makne vodeće nule). Dodaj 'date' ovdje ako želiš spriječiti Excel da interpretira datum."
         )
 
         def _force_text(df: pd.DataFrame) -> pd.DataFrame:
@@ -452,7 +479,6 @@ if st.session_state.get("mapped_ready", False):
 
         with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
-
         with st.expander("Preview (custom): Unmatched", expanded=False):
             st.dataframe(unmatched_out.head(200), use_container_width=True)
 
@@ -469,7 +495,7 @@ else:
     st.info("Učitaj datoteku i pokreni mapping.")
 
 # =============================================================================
-# Admin (PIN -> unlock) + Queue/Direct + Live search (NEON DB)
+# Admin (PIN -> unlock) + Queue/Direct + Live search
 # =============================================================================
 st.divider()
 st.subheader("Admin - Add / Queue / Apply Mappings - Live search")
