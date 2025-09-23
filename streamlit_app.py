@@ -4,7 +4,8 @@ import os
 import csv
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -53,6 +54,7 @@ def _fetch_vendors(filter_q: str = "", limit: int = 500) -> List[str]:
         params = {"lim": limit}
     df = _read_sql(q, params)
     vals = [str(x or "") for x in df["vendor_id"].tolist()]
+    # Ensure blank GLOBAL option at top
     if "" not in vals:
         vals.insert(0, "")
     else:
@@ -74,9 +76,10 @@ def _excel_bytes(dfs: Dict[str, pd.DataFrame]) -> bytes:
     with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
         for sheet, df in dfs.items():
             if isinstance(df, pd.DataFrame) and not df.empty:
-                df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet)
+                df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet[:31] or "Sheet")
     return bio.getvalue()
 
+@st.cache_resource(show_spinner=False)
 def _engine() -> Engine:
     db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
     if not db_url:
@@ -103,20 +106,20 @@ def columns_sortable_with_apply(preferred_order: List[str]) -> Optional[List[str
         st.warning("No columns available for export/reordering.")
         return None
 
-    # -- Session state initialization and filtering --
-    if "pending_export_cols" not in st.session_state or not isinstance(st.session_state["pending_export_cols"], list):
+    # Initialize only if not set
+    if "pending_export_cols" not in st.session_state:
         st.session_state["pending_export_cols"] = preferred_order.copy()
     else:
-        st.session_state["pending_export_cols"] = filter_to_options(st.session_state["pending_export_cols"], preferred_order)
-        if not st.session_state["pending_export_cols"]:
-            st.session_state["pending_export_cols"] = preferred_order.copy()
+        st.session_state["pending_export_cols"] = filter_to_options(
+            st.session_state["pending_export_cols"], preferred_order
+        ) or preferred_order.copy()
 
-    if "export_cols" not in st.session_state or not isinstance(st.session_state["export_cols"], list):
+    if "export_cols" not in st.session_state:
         st.session_state["export_cols"] = preferred_order.copy()
     else:
-        st.session_state["export_cols"] = filter_to_options(st.session_state["export_cols"], preferred_order)
-        if not st.session_state["export_cols"]:
-            st.session_state["export_cols"] = preferred_order.copy()
+        st.session_state["export_cols"] = filter_to_options(
+            st.session_state["export_cols"], preferred_order
+        ) or preferred_order.copy()
 
     if "columns_applied" not in st.session_state:
         st.session_state["columns_applied"] = True
@@ -219,17 +222,18 @@ if uploaded is not None:
             preview_df = pd.read_excel(uploaded)
         elif suffix == ".csv":
             content = uploaded.getvalue().decode("utf-8", errors="replace")
+            first_line = content.splitlines()[0] if content else ""
             try:
-                dialect = csv.Sniffer().sniff(content.splitlines()[0])
+                dialect = csv.Sniffer().sniff(first_line)
                 sep = dialect.delimiter
             except Exception:
-                sep = ","
+                sep = ","  # fallback
             preview_df = pd.read_csv(BytesIO(uploaded.getvalue()), sep=sep)
         elif suffix == ".pdf":
             if not _HAS_PDF:
                 st.error("PDF parsing nije omogućen (pdfplumber nije instaliran).")
             else:
-                tables = []
+                tables: List[pd.DataFrame] = []
                 with pdfplumber.open(BytesIO(uploaded.getvalue())) as pdf:
                     for page in pdf.pages:
                         try:
@@ -281,11 +285,19 @@ if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             df_sup["supplier_id"] = df_sup["supplier_id"].astype(str).str.strip()
             vparam = (vendor or "").strip()
 
-            df_map = _read_sql("""
-                SELECT vendor_id, supplier_id, tow_code
-                FROM crosswalk
-                WHERE vendor_id = :v OR vendor_id = ''
-            """, {"v": vparam})
+            if vparam:
+                # Vendor specific or GLOBAL fallback
+                df_map = _read_sql("""
+                    SELECT vendor_id, supplier_id, tow_code
+                    FROM crosswalk
+                    WHERE vendor_id = :v OR vendor_id = ''
+                """, {"v": vparam})
+            else:
+                # GLOBAL only + all vendor-specific (kept for previous behavior)
+                df_map = _read_sql("""
+                    SELECT vendor_id, supplier_id, tow_code
+                    FROM crosswalk
+                """)
 
             lookup = {(r["vendor_id"], r["supplier_id"]): r["tow_code"] for _, r in df_map.iterrows()}
 
@@ -359,11 +371,19 @@ if st.session_state.get("mapped_ready", False):
         with cE:
             date_manual = st.text_input("Manual Date (YYYY-MM-DD)", value="")
 
+        # Validate manual date if provided
+        if date_manual:
+            try:
+                datetime.strptime(date_manual, "%Y-%m-%d")
+            except ValueError:
+                st.warning("Manual date nije validan format (YYYY-MM-DD). Bit će ignoriran.")
+                date_manual = ""
+
         date_options = ["(none)"] + all_cols_now
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
 
     def _enrich(df: pd.DataFrame) -> pd.DataFrame:
-                    df2 = df.copy()
+        df2 = df.copy()
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
@@ -372,19 +392,16 @@ if st.session_state.get("mapped_ready", False):
             df2["date"] = date_manual
         elif date_choice != "(none)" and date_choice in df2.columns:
             df2["date"] = df2[date_choice]
-                    return df2
+        return df2
 
     matched_en = _enrich(matched)
     unmatched_en = _enrich(unmatched)
 
-    if "Location" not in matched_en.columns:
-        matched_en["Location"] = location_text
-    if "Location" not in unmatched_en.columns:
-        unmatched_en["Location"] = location_text
-
-    for df in [matched_en, unmatched_en]:
-        if "date" not in df.columns:
-            df["date"] = date_manual if date_manual else ""
+    for df_ref in [matched_en, unmatched_en]:
+        if "Location" not in df_ref.columns:
+            df_ref["Location"] = location_text
+        if "date" not in df_ref.columns:
+            df_ref["date"] = date_manual if date_manual else ""
 
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
     if "date" not in all_cols:
@@ -393,10 +410,13 @@ if st.session_state.get("mapped_ready", False):
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # --- RESET EXPORT COLUMN SESSION STATE TO CURRENT FILE COLUMNS ---
-    st.session_state["pending_export_cols"] = default_order.copy()
-    st.session_state["export_cols"] = default_order.copy()
-    st.session_state["columns_applied"] = True
+    # Initialize export column state only when column signature changes
+    col_signature: Tuple[str, ...] = tuple(default_order)
+    if st.session_state.get("_export_col_signature") != col_signature:
+        st.session_state["_export_col_signature"] = col_signature
+        st.session_state["pending_export_cols"] = default_order.copy()
+        st.session_state["export_cols"] = default_order.copy()
+        st.session_state["columns_applied"] = True
 
     if default_order:
         export_cols = columns_sortable_with_apply(default_order)
@@ -411,23 +431,24 @@ if st.session_state.get("mapped_ready", False):
 
         matched_out = _apply_selection(matched_en)
         unmatched_out = _apply_selection(unmatched_en)
-                # --- NEW: allow forcing selected columns to TEXT (string) for export ---
-                text_cols = st.multiselect(
+
+        text_cols = st.multiselect(
             "Force these columns to TEXT (strings) in the exported Excel",
             options=export_cols,
             help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
         )
-                def _force_text(df: pd.DataFrame) -> pd.DataFrame:
-                        if not text_cols:
-                return df
-                        df2 = df.copy()
-                        for c in text_cols:
-                                if c in df2.columns:
-                                        df2[c] = df2[c].astype("string").fillna("")
-                        return df2
-                matched_out = _force_text(matched_out)
-                unmatched_out = _force_text(unmatched_out)
 
+        def _force_text(df: pd.DataFrame) -> pd.DataFrame:
+            if not text_cols:
+                return df
+            df2 = df.copy()
+            for c in text_cols:
+                if c in df2.columns:
+                    df2[c] = df2[c].astype("string").fillna("")
+            return df2
+
+        matched_out = _force_text(matched_out)
+        unmatched_out = _force_text(unmatched_out)
 
         with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
@@ -436,7 +457,7 @@ if st.session_state.get("mapped_ready", False):
             st.dataframe(unmatched_out.head(200), use_container_width=True)
 
         st.download_button(
-            ⬇️ Download Excel (custom columns & order)",
+            "⬇️ Download Excel (custom columns & order)",
             data=_excel_bytes({"Matched": matched_out, "Unmatched": unmatched_out}),
             file_name="mapping_custom.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
