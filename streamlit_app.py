@@ -29,24 +29,20 @@ def _excel_bytes(
     text_cols: Dict[str, List[str]] | None = None
 ) -> bytes:
     """
-    Write multiple DataFrames to Excel. If text_cols is provided, it should be a
-    dict: {sheet_name: [col_name, ...]} and those columns will be forced to TEXT
-    format in Excel (keep leading zeros, no scientific notation).
+    Write multiple DataFrames to Excel. If text_cols is provided, it should be
+    a dict like {"Matched": ["PkgIdentNumber_1", ...], "Unmatched": [...]}.
+    Those columns are formatted as TEXT in Excel (keep leading zeros, no sci-not).
     """
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter") as w:
-        # TEXT format for Excel cells
-        text_fmt = w.book.add_format({"num_format": "@"})
-
+        text_fmt = w.book.add_format({"num_format": "@"})  # TEXT format
         for sheet, df in dfs.items():
             if isinstance(df, pd.DataFrame) and not df.empty:
                 df.reset_index(drop=True).to_excel(w, index=False, sheet_name=sheet)
-                # Apply TEXT format to requested columns
                 if text_cols and sheet in text_cols:
                     ws = w.sheets[sheet]
-                    want = [c for c in (text_cols.get(sheet) or []) if c in df.columns]
-                    for col_name in want:
-                        idx = int(df.columns.get_loc(col_name))  # 0-based column index
+                    for col in [c for c in text_cols[sheet] if c in df.columns]:
+                        idx = int(df.columns.get_loc(col))
                         ws.set_column(idx, idx, None, text_fmt)
     return bio.getvalue()
 
@@ -155,24 +151,22 @@ def _columns_editor(default_order: List[str]) -> List[str]:
 
 def _suggest_text_cols(df: pd.DataFrame) -> List[str]:
     """
-    Heuristic: suggest columns that contain long digit strings (>=12 consecutive digits)
-    which Excel might mangle (EANs, tracking numbers, etc.).
+    Suggest columns that contain long digit strings (>=12) likely to be IDs/EANs.
     """
-    sugg = []
+    out = []
     for c in df.columns:
-        s = df[c]
         try:
-            lens = s.astype(str).str.replace(r"\D", "", regex=True).str.len()
-            mx = lens.dropna().max()
-            if pd.notna(mx) and mx >= 12:
-                sugg.append(c)
+            lens = df[c].astype(str).str.replace(r"\D", "", regex=True).str.len()
+            m = lens.dropna().max()
+            if pd.notna(m) and m >= 12:
+                out.append(c)
         except Exception:
             pass
-    return sugg
+    return out
 
 
 def _coerce_cols_to_text(df: pd.DataFrame, cols: List[str]) -> None:
-    """In-place: force selected columns to strings (preserve as literal text)."""
+    """In-place: force selected columns to plain strings."""
     for c in cols:
         if c in df.columns:
             df[c] = df[c].apply(lambda v: "" if pd.isna(v) else str(v))
@@ -272,7 +266,7 @@ if uploaded is not None:
             st.caption(f"📄 Kolone: {', '.join(map(str, preview_df.columns))}")
             st.dataframe(preview_df.head(200), use_container_width=True)
 
-            # ---------- NEW: choose columns to treat as TEXT ----------
+            # ---------- TEXT columns chooser ----------
             with st.expander("Treat columns as TEXT (preserve long numbers / leading zeros)", expanded=False):
                 default_text_cols = st.session_state.get("text_cols_sel") or _suggest_text_cols(preview_df)
                 text_cols_sel = st.multiselect(
@@ -362,7 +356,7 @@ if st.session_state.get("mapped_ready", False):
         st.dataframe(unmatched.head(200), use_container_width=True)
 
     # -----------------------------------------------------------------------------
-    # 2a) OLD / SIMPLE EXPORT
+    # 2a) SIMPLE EXPORT (TEXT-aware)
     # -----------------------------------------------------------------------------
     _text_cols = st.session_state.get("text_cols_sel", []) or []
     text_map_simple = {
@@ -379,18 +373,21 @@ if st.session_state.get("mapped_ready", False):
     )
 
     # -----------------------------------------------------------------------------
-    # 2b) Custom export (add Invoice/Item/vendor_id/date + choose columns & order)
+    # 2b) Custom export (add Invoice/Item/vendor_id/location/date + choose order)
     # -----------------------------------------------------------------------------
     st.subheader("3) Custom export (add columns + choose order)")
 
     invoice_label = "Invoice"
     item_label = "Item"
     vendor_to_stamp = (vendor if vendor != "" else "GLOBAL")
-    all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
+    location_label = "H00"       # NEW: Location constant
+    manual_date = ""             # NEW: Manual date override (YYYY-MM-DD)
     date_choice = "(none)"
 
-    with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, date)", expanded=True):
-        cA, cB, cC = st.columns([1, 1, 1.3])
+    all_cols_now = list(dict.fromkeys(list(matched.columns) + list(unmatched.columns)))
+
+    with st.expander("Optional: dodatne kolone (Invoice, Item, vendor_id, location, date)", expanded=True):
+        cA, cB, cC, cD, cE = st.columns([1, 1, 1.3, 1, 1.3])
         with cA:
             invoice_label = st.text_input("Constant value for 'Invoice'", value="Invoice")
         with cB:
@@ -398,8 +395,12 @@ if st.session_state.get("mapped_ready", False):
         with cC:
             vendor_to_stamp = st.text_input(
                 "vendor_id to stamp on export",
-                value=(vendor if vendor != "" else "GLOBAL")
+                value=(vendor if vendor != "" else "DOB0000025")  # put your default if needed
             ).strip().upper() or "GLOBAL"
+        with cD:
+            location_label = st.text_input("Constant value for 'Location'", value="H00")
+        with cE:
+            manual_date = st.text_input("Manual Date (YYYY-MM-DD)", value="")
 
         date_options = ["(none)"] + all_cols_now
         date_choice = st.selectbox("Pick Date column from uploaded file (optional)", options=date_options, index=0)
@@ -409,7 +410,11 @@ if st.session_state.get("mapped_ready", False):
         df2["Invoice"] = invoice_label
         df2["Item"] = item_label
         df2["vendor_id"] = vendor_to_stamp
-        if date_choice != "(none)" and date_choice in df2.columns:
+        df2["Location"] = location_label
+        # date priority: manual > chosen column > none
+        if manual_date.strip():
+            df2["date"] = manual_date.strip()
+        elif date_choice != "(none)" and date_choice in df2.columns:
             df2["date"] = df2[date_choice]
         return df2
 
@@ -418,11 +423,11 @@ if st.session_state.get("mapped_ready", False):
 
     # Build preferred order
     all_cols = list(dict.fromkeys(list(matched_en.columns) + list(unmatched_en.columns)))
-    preferred_first = [c for c in ["Invoice", "Item", "date", "vendor_id", "tow"] if c in all_cols]
+    preferred_first = [c for c in ["Invoice", "Item", "Location", "date", "vendor_id", "tow"] if c in all_cols]
     rest = [c for c in all_cols if c not in preferred_first]
     default_order = preferred_first + rest
 
-    # Get ordered column selection
+    # Ordered column selection (robust)
     export_cols = _columns_editor(default_order)
     if not export_cols:
         export_cols = default_order
