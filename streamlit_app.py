@@ -410,9 +410,6 @@ if st.session_state.get("mapped_ready", False):
             cols_in_df = [c for c in export_cols if c in df.columns]
             return df[cols_in_df] if cols_in_df else df
 
-        matched_out = _apply_selection(matched_en)
-        unmatched_out = _apply_selection(unmatched_en)
-
 # Choose columns to force as TEXT in the export to prevent large-number issues (e.g., 2^53 limit)
 text_cols = st.multiselect(
     "Force these columns to TEXT (strings) in the exported Excel",
