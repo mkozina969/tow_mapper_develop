@@ -411,6 +411,22 @@ if st.session_state.get("mapped_ready", False):
 
         matched_out = _apply_selection(matched_en)
         unmatched_out = _apply_selection(unmatched_en)
+# --- NEW: allow forcing selected columns to TEXT (string) for export ---
+text_cols = st.multiselect(
+    "Force these columns to TEXT (strings) in the exported Excel",
+    options=export_cols,
+    help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
+)
+def _force_text(df: pd.DataFrame) -> pd.DataFrame:
+    if not text_cols:
+        return df
+    df2 = df.copy()
+    for c in text_cols:
+        if c in df2.columns:
+            df2[c] = df2[c].astype("string").fillna("")
+    return df2
+matched_out = _force_text(matched_out)
+unmatched_out = _force_text(unmatched_out)
 
         with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
