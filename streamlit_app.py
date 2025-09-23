@@ -414,7 +414,8 @@ matched_out = _force_text(matched_out)
 unmatched_out = _force_text(unmatched_out)
 
  # === NEW: Force selected columns to TEXT (string dtype) before export ===
-    text_cols = st.multiselect(
+
+     text_cols = st.multiselect(
         "Force these columns to TEXT (strings) in the exported Excel",
         options=export_cols,
         help="Useful for long IDs, product numbers, postal codes, etc. Values will be written as strings."
@@ -431,7 +432,8 @@ unmatched_out = _force_text(unmatched_out)
 
     matched_out = _force_text(matched_out)
     unmatched_out = _force_text(unmatched_out)
-    # === END NEW ===
+    
+# === END NEW ===
 
 with st.expander("Preview (custom): Matched", expanded=False):
             st.dataframe(matched_out.head(200), use_container_width=True)
