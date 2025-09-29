@@ -664,3 +664,66 @@ try:
                 st.success("Prefilled — skrolaj gore do 'Add a single mapping'.")
 except Exception as e:
     st.error(f"Search failed: {e}")
+# =============================================================================
+# Backend Features Tab (Audit, Health, Metrics, Fuzzy Mapping)
+# =============================================================================
+
+import requests
+
+with st.container():
+    st.divider()
+    st.header("🛠️ Backend Features (Audit, Health, Metrics, Fuzzy Mapping)")
+
+    API_BASE = "https://towmapperdevelop-yucyosu7piupvv5xy8ob8o.streamlit.app"  # Set to your backend API base URL
+
+    # Health check
+    if st.button("Show backend health status", key="btn_backend_health"):
+        try:
+            resp = requests.get(f"{API_BASE}/status/health")
+            if resp.status_code == 200:
+                st.success(resp.json())
+            else:
+                st.error(f"Could not fetch health status: {resp.status_code}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    # Prometheus metrics
+    if st.button("Show backend metrics", key="btn_backend_metrics"):
+        try:
+            resp = requests.get(f"{API_BASE}/status/metrics")
+            if resp.status_code == 200:
+                st.code(resp.text, language="yaml")
+            else:
+                st.error(f"Could not fetch metrics: {resp.status_code}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    # Mapping audit log
+    if st.button("Show mapping audit log", key="btn_backend_audit"):
+        try:
+            resp = requests.get(f"{API_BASE}/mapping/audit/", headers={"X-Role": "admin"})
+            if resp.status_code == 200 and resp.json():
+                df = pd.DataFrame(resp.json())
+                st.dataframe(df)
+            elif resp.status_code == 200:
+                st.info("No mapping audit entries yet.")
+            else:
+                st.error(f"Could not fetch audit log: {resp.status_code}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    # Fuzzy mapping suggestion
+    st.subheader("🧠 Fuzzy Mapping Suggestion")
+    st.write("Upload vendor/supplier pairs (CSV/XLSX) to get auto-mapping suggestions from backend.")
+    fuzzy_file = st.file_uploader("Upload mapping candidates", type=["csv", "xlsx"], key="fuzzy_map")
+    if fuzzy_file:
+        try:
+            files = {"file": (fuzzy_file.name, fuzzy_file, "application/octet-stream")}
+            resp = requests.post(f"{API_BASE}/mapping/fuzzy_map/", files=files, headers={"X-Role": "user"})
+            if resp.status_code == 200:
+                df = pd.DataFrame(resp.json())
+                st.dataframe(df)
+            else:
+                st.error(f"Fuzzy mapping failed: {resp.status_code} {resp.text}")
+        except Exception as e:
+            st.error(f"Error: {e}")
